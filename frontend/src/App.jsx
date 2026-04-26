@@ -2,6 +2,7 @@ import { Suspense, lazy, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import Sidebar from "./components/layout/Sidebar";
 import HeaderBar from "./components/layout/HeaderBar";
+import AuthGuard from "./components/AuthGuard";
 import { NAV_ITEMS } from "./constants/navigation";
 import { useSocData } from "./hooks/useSocData";
 import SkeletonBlock from "./components/common/SkeletonBlock";
@@ -18,8 +19,14 @@ const SecurityToolsPage = lazy(() => import("./pages/SecurityToolsPage"));
 const PentestConsolePage = lazy(() => import("./pages/PentestConsolePage"));
 const ActivityTimelinePage = lazy(() => import("./pages/ActivityTimelinePage"));
 const IncidentView = lazy(() => import("./pages/IncidentView"));
+const LoginPage = lazy(() => import("./pages/LoginPage"));
+const SignupPage = lazy(() => import("./pages/SignupPage"));
 
-function App() {
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Authenticated App Shell — sidebar + header + protected routes             */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+function AuthenticatedApp() {
   const [selectedIp, setSelectedIp] = useState("");
   const navigate = useNavigate();
   const location = useLocation();
@@ -87,7 +94,6 @@ function App() {
               }
             >
               <Routes>
-                <Route path="/" element={<Navigate to="/dashboard" replace />} />
                 <Route path="/dashboard" element={<DashboardPage {...sharedScreenProps} />} />
                 <Route path="/live-monitoring" element={<LiveMonitoringPage {...sharedScreenProps} />} />
                 <Route path="/alerts" element={<AlertsPage {...sharedScreenProps} />} />
@@ -108,6 +114,38 @@ function App() {
         </div>
       </main>
     </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Root App — handles login/signup vs authenticated shell                    */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+function App() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-screen items-center justify-center bg-surface">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" />
+        </div>
+      }
+    >
+      <Routes>
+        {/* Public routes — no auth required */}
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/signup" element={<SignupPage />} />
+
+        {/* All other routes require authentication */}
+        <Route
+          path="/*"
+          element={
+            <AuthGuard>
+              <AuthenticatedApp />
+            </AuthGuard>
+          }
+        />
+      </Routes>
+    </Suspense>
   );
 }
 

@@ -10,13 +10,13 @@ async def seed():
         conn = await asyncpg.connect(
             database="ids_system",
             user="postgres",
-            password="1234",
+            password="123",
             host="localhost",
             port=5432
         )
         print("Connected.")
         
-        sql_path = Path("d:/CIC/Last semester 2026/Graduation Project/MachineLearning/Cyber-Attack-AI/seed_test_data.sql")
+        sql_path = Path("C:/Users/Yusse/Workspace/Graduation Project/Full AI Agent/grad_project/seed_test_data.sql")
         sql_content = sql_path.read_text(encoding="utf-8")
         
         print("Executing seed script...")

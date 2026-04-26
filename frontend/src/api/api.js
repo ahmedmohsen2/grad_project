@@ -14,6 +14,10 @@
  *   getBlockedIps()
  *   getHealth()
  *   markAlertRead(id)
+ *   authLogin(identifier, password)
+ *   authSignup(username, email, password, invite_key)
+ *   authMe()
+ *   getToken() / setToken() / clearToken()
  *
  * All functions return a Promise<data> and throw on HTTP errors.
  * Callers (hooks) are responsible for try/catch + fallback data.
@@ -23,27 +27,124 @@ const BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal helper
+// Token management  (localStorage)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TOKEN_KEY = "soc_auth_token";
+const USER_KEY = "soc_auth_user";
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token) {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearToken() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+}
+
+export function getStoredUser() {
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredUser(user) {
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
+export function isAuthenticated() {
+  return !!getToken();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal helper  (auto-attaches Bearer token)
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function apiFetch(path, options = {}) {
   const url = `${BASE_URL}${path}`;
 
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers ?? {}),
+  };
+
+  // Auto-attach auth token if present
+  const token = getToken();
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
   const response = await fetch(url, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers ?? {}),
-    },
+    headers,
     ...options,
   });
 
+  // If 401, clear stale token
+  if (response.status === 401) {
+    clearToken();
+    // Dispatch custom event so React can redirect to login
+    window.dispatchEvent(new CustomEvent("auth:expired"));
+  }
+
   if (!response.ok) {
-    throw new Error(
-      `[API] ${options.method ?? "GET"} ${path} failed — HTTP ${response.status}`
+    const errorBody = await response.json().catch(() => ({}));
+    const err = new Error(
+      errorBody.error ||
+        `[API] ${options.method ?? "GET"} ${path} failed — HTTP ${response.status}`
     );
+    err.status = response.status;
+    err.body = errorBody;
+    throw err;
   }
 
   return response.json();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth endpoints  (public — no token needed)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /auth/login
+ * @param {string} identifier  email or username
+ * @param {string} password
+ * @returns {Promise<{token, user}>}
+ */
+export function authLogin(identifier, password) {
+  return apiFetch("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ identifier, password }),
+  });
+}
+
+/**
+ * POST /auth/signup
+ * @param {string} username
+ * @param {string} email
+ * @param {string} password
+ * @param {string} invite_key
+ * @returns {Promise<{message, user}>}
+ */
+export function authSignup(username, email, password, invite_key) {
+  return apiFetch("/auth/signup", {
+    method: "POST",
+    body: JSON.stringify({ username, email, password, invite_key }),
+  });
+}
+
+/**
+ * GET /auth/me — Validate token and return current user
+ * @returns {Promise<{user}>}
+ */
+export function authMe() {
+  return apiFetch("/auth/me");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

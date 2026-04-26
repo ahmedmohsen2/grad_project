@@ -1,8 +1,10 @@
 import { useNavigate } from "react-router-dom";
 import StatusBadge from "../common/StatusBadge";
+import { useAuth } from "../../hooks/useAuth.jsx";
 
 function Sidebar({ items, activeScreen, counts }) {
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
 
   return (
     <aside className="relative z-20 flex w-full flex-col border-b border-slate-800/80 bg-panelAlt/95 px-5 py-6 backdrop-blur lg:fixed lg:left-0 lg:top-0 lg:h-screen lg:w-[296px] lg:border-b-0 lg:border-r">
@@ -43,10 +45,12 @@ function Sidebar({ items, activeScreen, counts }) {
       </nav>
 
       <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4">
-        <p className="text-sm font-medium text-emerald-200">Ahmed K.</p>
-        <p className="mt-1 text-sm text-slate-400">SOC Analyst</p>
+        <p className="text-sm font-medium text-emerald-200">{user?.username ?? "User"}</p>
+        <p className="mt-1 text-sm text-slate-400">{user?.role ?? "Analyst"}</p>
         <button
+          id="logout-button"
           type="button"
+          onClick={logout}
           className="mt-4 w-full rounded-xl border border-slate-700 bg-slate-900/70 px-4 py-2 text-sm text-slate-200 transition-all duration-300 hover:scale-[1.02] hover:border-slate-600 hover:bg-slate-800"
         >
           Logout

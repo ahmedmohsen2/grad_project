@@ -1,7 +1,10 @@
 import Panel from "../components/common/Panel";
 import DataTable from "../components/common/DataTable";
+import { useAuth } from "../hooks/useAuth.jsx";
 
 function ActionsScreen({ soc }) {
+  const { user } = useAuth();
+
   const isolatedDevices = soc.hosts
     .filter((item) => item.status === "ISOLATED")
     .map((item) => ({
@@ -15,7 +18,7 @@ function ActionsScreen({ soc }) {
     .slice(0, 4)
     .map((item) => ({
       ip: item.ip,
-      addedBy: "SOC Analyst",
+      addedBy: user?.username ?? "Analyst",
     }));
 
   return (

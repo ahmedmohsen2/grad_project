@@ -1,1 +1,0 @@
-import{j as t,P as e,E as o}from"./index-DwcjENlN.js";function i(){return t.jsx(e,{title:"Security Tools",subtitle:"Future Module",children:t.jsx(o,{title:"Security tools module is ready for expansion",description:"Use this route for future playbooks, enrichment tools, IOC search, and analyst utilities."})})}export{i as default};

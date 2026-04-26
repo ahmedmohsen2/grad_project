@@ -10,6 +10,10 @@ uvicorn[standard]
 flask
 flask-cors
 
+# Authentication
+PyJWT
+bcrypt
+
 # Async Database
 asyncpg
 sqlalchemy

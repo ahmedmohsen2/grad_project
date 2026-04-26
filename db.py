@@ -50,7 +50,7 @@ from asyncpg import Pool
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
 
-DB_DSN        = "postgresql://postgres:1234@localhost:5432/ids_system"
+DB_DSN        = "postgresql://postgres:123@localhost:5432/ids_system"
 POOL_MIN_SIZE = 5
 POOL_MAX_SIZE = 20
 
@@ -821,6 +821,21 @@ async def ensure_runtime_schema() -> bool:
         "CREATE INDEX IF NOT EXISTS idx_activity_logs_type ON activity_logs (type)",
         "CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs (created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_activity_logs_target ON activity_logs (target)",
+        # ── Auth: users table ────────────────────────────────────────────────
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id            SERIAL PRIMARY KEY,
+            username      TEXT UNIQUE NOT NULL,
+            email         TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role          TEXT NOT NULL DEFAULT 'analyst',
+            is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_login_at TIMESTAMPTZ
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)",
+        "CREATE INDEX IF NOT EXISTS idx_users_username ON users (username)",
     ]
     for statement in statements:
         ok = await _execute(statement)
@@ -1744,3 +1759,112 @@ def sync_init_pool() -> None:
     """
     _run_async(init_pool())
     _run_async(ensure_runtime_schema())
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# USER AUTH CRUD  (used by auth.py)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from datetime import datetime
+
+
+async def create_user(username: str, email: str, password_hash: str, role: str = "analyst") -> Optional[dict]:
+    """
+    Insert a new user and return the created row as dict.
+    Returns None on duplicate or DB error.
+    """
+    pool = get_pool()
+    if pool is None:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO users (username, email, password_hash, role, created_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                RETURNING id, username, email, role, is_active, created_at
+                """,
+                username, email, password_hash, role,
+            )
+        if row:
+            result = dict(row)
+            if result.get("created_at") and hasattr(result["created_at"], "isoformat"):
+                result["created_at"] = result["created_at"].isoformat()
+            return result
+        return None
+    except asyncpg.UniqueViolationError:
+        log.warning(f"[DB] create_user duplicate — username={username} email={email}")
+        return None
+    except Exception as exc:
+        log.error(f"[DB ERROR] create_user failed: {exc}")
+        return None
+
+
+async def get_user_by_email(email: str) -> Optional[dict]:
+    """Fetch a user by email address."""
+    return await _fetchone(
+        "SELECT id, username, email, password_hash, role, is_active, created_at, last_login_at FROM users WHERE email = $1",
+        email,
+    )
+
+
+async def get_user_by_username(username: str) -> Optional[dict]:
+    """Fetch a user by username."""
+    return await _fetchone(
+        "SELECT id, username, email, password_hash, role, is_active, created_at, last_login_at FROM users WHERE username = $1",
+        username,
+    )
+
+
+async def get_user_by_id(user_id: int) -> Optional[dict]:
+    """Fetch a user by primary key."""
+    return await _fetchone(
+        "SELECT id, username, email, role, is_active, created_at, last_login_at FROM users WHERE id = $1",
+        int(user_id),
+    )
+
+
+async def update_last_login(user_id: int) -> bool:
+    """Update the last_login_at timestamp for a user."""
+    return await _execute(
+        "UPDATE users SET last_login_at = NOW() WHERE id = $1",
+        int(user_id),
+    )
+
+
+# ── Sync wrappers for auth (Flask context) ───────────────────────────────────
+
+def sync_create_user(username: str, email: str, password_hash: str, role: str = "analyst") -> Optional[dict]:
+    try:
+        return _run_async(create_user(username, email, password_hash, role))
+    except Exception:
+        return None
+
+
+def sync_get_user_by_email(email: str) -> Optional[dict]:
+    try:
+        return _run_async(get_user_by_email(email))
+    except Exception:
+        return None
+
+
+def sync_get_user_by_username(username: str) -> Optional[dict]:
+    try:
+        return _run_async(get_user_by_username(username))
+    except Exception:
+        return None
+
+
+def sync_get_user_by_id(user_id: int) -> Optional[dict]:
+    try:
+        return _run_async(get_user_by_id(user_id))
+    except Exception:
+        return None
+
+
+def sync_update_last_login(user_id: int) -> bool:
+    try:
+        return _run_async(update_last_login(user_id)) or False
+    except Exception:
+        return False
+

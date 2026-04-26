@@ -43,8 +43,12 @@ from pentest_agent.config import PENTEST_MODE
 
 app = Flask(__name__)
 
-# Allow React dev-server (port 5173) and any local frontend to reach the API
-CORS(app, resources={r"/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}})
+# Allow React dev-server (port 5173), any local frontend, and mobile apps
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# ── Auth Blueprint ───────────────────────────────────────────────────────────
+from auth import auth_bp, require_auth
+app.register_blueprint(auth_bp)
 
 # Initialise the asyncpg pool at startup (sync bridge for Flask context)
 sync_init_pool()
@@ -280,6 +284,7 @@ def health():
 # ==============================================================================
 
 @app.route("/alerts", methods=["GET"])
+@require_auth
 def alerts_list():
     """
     GET /alerts
@@ -332,6 +337,7 @@ def alerts_list():
 
 
 @app.route("/alerts/read/<int:alert_id>", methods=["POST"])
+@require_auth
 def alert_mark_read(alert_id: int):
     """
     POST /alerts/read/<id>
@@ -347,6 +353,7 @@ def alert_mark_read(alert_id: int):
 
 
 @app.route("/pentest/findings", methods=["GET"])
+@require_auth
 def pentest_findings():
     try:
         limit = min(int(request.args.get("limit", 50)), 200)
@@ -378,6 +385,7 @@ def _safe_offset() -> int:
 
 
 @app.route("/detections", methods=["GET"])
+@require_auth
 def detections_list():
     """
     GET /detections?limit=20&offset=0&src_ip=<optional>
@@ -391,6 +399,7 @@ def detections_list():
 
 
 @app.route("/flows", methods=["GET"])
+@require_auth
 def flows_list():
     """
     GET /flows?limit=20&offset=0&src_ip=<optional>
@@ -404,6 +413,7 @@ def flows_list():
 
 
 @app.route("/actions", methods=["GET"])
+@require_auth
 def actions_list():
     """
     GET /actions?limit=20&offset=0
@@ -416,6 +426,7 @@ def actions_list():
 
 
 @app.route("/blocked-ips", methods=["GET"])
+@require_auth
 def blocked_ips_list():
     """
     GET /blocked-ips
@@ -474,6 +485,7 @@ def _execute_simulated_action(action: str, target: str, reason: str, source: str
 
 
 @app.route("/actions/state/<path:target>", methods=["GET"])
+@require_auth
 def action_state_get(target: str):
     return jsonify(_get_action_state(target)), 200
 
@@ -491,6 +503,7 @@ def auto_response_update():
 
 
 @app.route("/actions/block", methods=["POST"])
+@require_auth
 def action_block():
     data = request.get_json() or {}
     payload, status_code = _execute_simulated_action("BLOCK", data.get("target"), data.get("reason", "Manual block"), "manual")
@@ -509,6 +522,7 @@ def action_block():
 
 
 @app.route("/actions/isolate", methods=["POST"])
+@require_auth
 def action_isolate():
     data = request.get_json() or {}
     payload, status_code = _execute_simulated_action("ISOLATE", data.get("target"), data.get("reason", "Manual isolate"), "manual")
@@ -527,6 +541,7 @@ def action_isolate():
 
 
 @app.route("/actions/whitelist", methods=["POST"])
+@require_auth
 def action_whitelist():
     data = request.get_json() or {}
     payload, status_code = _execute_simulated_action("WHITELIST", data.get("target"), data.get("reason", "Manual whitelist"), "manual")
@@ -545,6 +560,7 @@ def action_whitelist():
 
 
 @app.route("/block", methods=["POST"])
+@require_auth
 def manual_block():
     data = request.get_json() or {}
     payload, status_code = _execute_simulated_action("BLOCK", data.get("ip"), data.get("reason", "Legacy manual block"), "manual")
@@ -552,6 +568,7 @@ def manual_block():
 
 
 @app.route("/unblock", methods=["POST"])
+@require_auth
 def manual_unblock():
     data = request.get_json() or {}
     payload, status_code = execute_host_action(
@@ -565,6 +582,7 @@ def manual_unblock():
 
 
 @app.route("/isolate", methods=["POST"])
+@require_auth
 def manual_isolate():
     data = request.get_json() or {}
     payload, status_code = _execute_simulated_action("ISOLATE", data.get("ip"), data.get("reason", "Legacy manual isolate"), "manual")
@@ -572,6 +590,7 @@ def manual_isolate():
 
 
 @app.route("/unisolate", methods=["POST"])
+@require_auth
 def manual_unisolate():
     data = request.get_json() or {}
     payload, status_code = execute_host_action(
@@ -788,6 +807,7 @@ def _run_pentest_pipeline(scan_id: str, target: str, scan_type: str, triggered_b
 
 
 @app.route("/pentest/scan", methods=["POST"])
+@require_auth
 def pentest_start_scan():
     """
     POST /pentest/scan
@@ -873,6 +893,7 @@ def pentest_start_scan():
 
 
 @app.route("/pentest/results/<scan_id>", methods=["GET"])
+@require_auth
 def pentest_get_results(scan_id: str):
     """
     GET /pentest/results/<scan_id>
@@ -886,6 +907,7 @@ def pentest_get_results(scan_id: str):
 
 
 @app.route("/pentest/scans", methods=["GET"])
+@require_auth
 def pentest_list_scans():
     """
     GET /pentest/scans?limit=20&offset=0
@@ -909,6 +931,7 @@ from db import sync_get_activity_logs  # noqa: E402
 
 
 @app.route('/pentest/report/<scan_id>', methods=['GET'])
+@require_auth
 def pentest_get_report(scan_id: str):
     record = sync_get_pentest_scan(scan_id)
     if not record:
@@ -926,6 +949,7 @@ def pentest_get_report(scan_id: str):
 
 
 @app.route('/activity/logs', methods=['GET'])
+@require_auth
 def activity_logs_list():
     limit = _safe_limit(default=50, maximum=200)
     type_filter = (request.args.get('type') or '').strip() or None

@@ -131,3 +131,15 @@ AUTO_RESPONSE_ENABLED = False
 AUTO_RESPONSE_MAX_ACTIONS_PER_IP = 3
 AUTO_RESPONSE_COOLDOWN_SEC = 600
 AUTO_RESPONSE_HIGH_PPS = 100
+
+# ==============================
+# 🔐 Authentication / JWT
+# ==============================
+import os as _os
+
+JWT_SECRET_KEY = _os.environ.get(
+    "JWT_SECRET_KEY",
+    "ids-soc-jwt-secret-b7f3e9a1c2d4e6f8"   # default for dev — override in production!
+)
+JWT_EXPIRATION_HOURS = 24       # token lifetime
+INVITE_KEY = "1913"             # static access key for signup
