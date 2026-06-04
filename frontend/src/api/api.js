@@ -1,3 +1,6 @@
+import { API_BASE_URL } from "./baseUrl";
+import { getBandwidthProfile, simulatedClientDelay, sleep } from "../utils/bandwidth";
+
 /**
  * api/api.js  —  Clean API Layer for the IDS/IPS SOC Dashboard
  * ──────────────────────────────────────────────────────────────
@@ -23,8 +26,7 @@
  * Callers (hooks) are responsible for try/catch + fallback data.
  */
 
-const BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000";
+const BASE_URL = API_BASE_URL;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Token management  (localStorage)
@@ -69,9 +71,11 @@ export function isAuthenticated() {
 
 async function apiFetch(path, options = {}) {
   const url = `${BASE_URL}${path}`;
+  const profile = getBandwidthProfile();
 
   const headers = {
     "Content-Type": "application/json",
+    "X-Bandwidth-Profile": profile,
     ...(options.headers ?? {}),
   };
 
@@ -81,10 +85,26 @@ async function apiFetch(path, options = {}) {
     headers["Authorization"] = `Bearer ${token}`;
   }
 
+  const startedAt = performance.now();
   const response = await fetch(url, {
     headers,
     ...options,
   });
+  const bodySize = Number(response.headers.get("content-length") || 0);
+  const simulatedDelay = simulatedClientDelay(profile, bodySize);
+  if (simulatedDelay > 0) {
+    await sleep(simulatedDelay);
+  }
+  window.dispatchEvent(new CustomEvent("performance:api", {
+    detail: {
+      path,
+      profile,
+      responseTimeMs: performance.now() - startedAt,
+      backendTimeMs: Number(response.headers.get("X-Response-Time-Ms") || 0),
+      simulatedDelayMs: simulatedDelay,
+      status: response.status,
+    },
+  }));
 
   // If 401, clear stale token
   if (response.status === 401) {
@@ -95,10 +115,14 @@ async function apiFetch(path, options = {}) {
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => ({}));
+    const serverMessage = errorBody.message || errorBody.error;
     const err = new Error(
       errorBody.error ||
         `[API] ${options.method ?? "GET"} ${path} failed — HTTP ${response.status}`
     );
+    if (response.status === 403) {
+      err.message = serverMessage || "Your SOC role is not permitted to execute this containment action.";
+    }
     err.status = response.status;
     err.body = errorBody;
     throw err;

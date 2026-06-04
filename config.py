@@ -4,6 +4,26 @@ config.py — مصدر حقيقة واحد لكل ثوابت النظام
 كل الملفات لازم تـ import منه، متحطش ثوابت في أكتر من مكان.
 """
 
+from __future__ import annotations
+
+import os as _os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _get_bool(name: str, default: bool) -> bool:
+    return _os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_int(name: str, default: int) -> int:
+    try:
+        return int(_os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 # ==============================
 # 🎯 عتبات القرار (XGBoost)
 # TUNED: raised thresholds to reduce false positives
@@ -120,26 +140,59 @@ ATTACK_CLASS_NAMES = {
 # ==============================
 # 🌐 Flask API
 # ==============================
-API_HOST = "127.0.0.1"
-API_PORT = 5000
+API_HOST = _os.getenv("API_HOST", "127.0.0.1")
+API_PORT = _get_int("API_PORT", 5000)
 API_URL  = f"http://{API_HOST}:{API_PORT}/predict"
+DEBUG = _get_bool("DEBUG", False)
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in _os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173",
+    ).split(",")
+    if origin.strip()
+]
 
 # ==============================
 # Auto Response
 # ==============================
-AUTO_RESPONSE_ENABLED = False
-AUTO_RESPONSE_MAX_ACTIONS_PER_IP = 3
-AUTO_RESPONSE_COOLDOWN_SEC = 600
-AUTO_RESPONSE_HIGH_PPS = 100
+AUTO_RESPONSE_ENABLED         = True   # Active XDR enforcement
+AUTO_RESPONSE_MAX_ACTIONS_PER_IP = 5   # Max enforcement actions per IP per hour
+AUTO_RESPONSE_COOLDOWN_SEC    = 30     # Cooldown between actions (seconds) — demo-safe
+AUTO_RESPONSE_HIGH_PPS        = 50     # PPS threshold for isolation trigger
+
 
 # ==============================
 # 🔐 Authentication / JWT
 # ==============================
-import os as _os
-
 JWT_SECRET_KEY = _os.environ.get(
     "JWT_SECRET_KEY",
     "ids-soc-jwt-secret-b7f3e9a1c2d4e6f8"   # default for dev — override in production!
 )
-JWT_EXPIRATION_HOURS = 24       # token lifetime
-INVITE_KEY = "1913"             # static access key for signup
+JWT_EXPIRATION_HOURS = _get_int("JWT_EXPIRATION_HOURS", 24)
+INVITE_KEY = _os.getenv("INVITE_KEY", "1913")
+ADMIN_INVITE_KEY = _os.getenv("ADMIN_INVITE_KEY", "").strip()
+API_TOKEN = _os.getenv("API_TOKEN", "").strip()
+
+# ==============================
+# Network Sensor Deployment
+# ==============================
+SENSOR_MODE = _os.getenv("SENSOR_MODE", "host").strip().lower()
+if SENSOR_MODE not in {"host", "span", "tap", "inline"}:
+    SENSOR_MODE = "host"
+
+CAPTURE_INTERFACE = _os.getenv("CAPTURE_INTERFACE", "").strip()
+PROMISCUOUS_MODE = _get_bool("PROMISCUOUS_MODE", True)
+
+# ==============================
+# IPS Enforcement
+# ==============================
+IPS_MODE = _os.getenv("IPS_MODE", "local_firewall").strip().lower()
+if IPS_MODE not in {"database", "local_firewall", "gateway_firewall", "inline"}:
+    IPS_MODE = "local_firewall"
+
+FIREWALL_BACKEND = _os.getenv("FIREWALL_BACKEND", "windows").strip().lower()
+if FIREWALL_BACKEND not in {"auto", "windows", "iptables", "nftables"}:
+    FIREWALL_BACKEND = "windows"
+
+IPS_VERIFY_TIMEOUT_SEC = _get_int("IPS_VERIFY_TIMEOUT_SEC", 5)

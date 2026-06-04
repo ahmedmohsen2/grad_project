@@ -4,6 +4,7 @@ export const NAV_ITEMS = [
     path: "/dashboard",
     label: "Command Center",
     shortLabel: "Dashboard",
+    icon: "🛡️",
     description: "Fast overview of threat posture and analyst priorities.",
   },
   {
@@ -11,6 +12,7 @@ export const NAV_ITEMS = [
     path: "/live-monitoring",
     label: "Live Monitoring",
     shortLabel: "Live Monitoring",
+    icon: "📡",
     description: "Real-time traffic visibility across the monitored network.",
   },
   {
@@ -18,6 +20,7 @@ export const NAV_ITEMS = [
     path: "/alerts",
     label: "Alerts",
     shortLabel: "Alerts",
+    icon: "🔔",
     description: "Triage recent alerts and mark acknowledged events.",
   },
   {
@@ -25,6 +28,7 @@ export const NAV_ITEMS = [
     path: "/suspicious-queue",
     label: "Suspicious Queue",
     shortLabel: "Suspicious Queue",
+    icon: "⚠️",
     description: "Decision-focused queue for suspicious and active detections.",
   },
   {
@@ -32,6 +36,7 @@ export const NAV_ITEMS = [
     path: "/incidents",
     label: "Incidents",
     shortLabel: "Incidents",
+    icon: "🔥",
     description: "Correlated incidents, timelines, and analyst notes.",
   },
   {
@@ -39,6 +44,7 @@ export const NAV_ITEMS = [
     path: "/hosts",
     label: "Hosts",
     shortLabel: "Hosts",
+    icon: "🖥️",
     description: "Inspect monitored hosts and review IP-level behavior.",
   },
   {
@@ -46,27 +52,15 @@ export const NAV_ITEMS = [
     path: "/actions",
     label: "Actions",
     shortLabel: "Actions",
+    icon: "⚡",
     description: "Containment actions, blocked IPs, and isolation state.",
-  },
-  {
-    id: "system-status",
-    path: "/system-status",
-    label: "System Status",
-    shortLabel: "System Status",
-    description: "Operational health for AI, API, and platform services.",
-  },
-  {
-    id: "security-tools",
-    path: "/security-tools",
-    label: "Security Tools",
-    shortLabel: "Security Tools",
-    description: "Reserved route for future enrichment and analyst tooling.",
   },
   {
     id: "pentest-console",
     path: "/pentest",
     label: "Pentest Console",
     shortLabel: "Pentest",
+    icon: "🔬",
     description: "AI-powered penetration testing with Nmap scanning.",
   },
   {
@@ -74,6 +68,31 @@ export const NAV_ITEMS = [
     path: "/activity-timeline",
     label: "Activity Timeline",
     shortLabel: "Timeline",
+    icon: "📋",
     description: "Centralized log of all system events — pentest, auto-response, alerts.",
+  },
+  {
+    id: "system-status",
+    path: "/system-status",
+    label: "System Status",
+    shortLabel: "System Status",
+    icon: "💚",
+    description: "Operational health for AI, API, and platform services.",
+  },
+  {
+    id: "network-visibility",
+    path: "/network-visibility",
+    label: "Network Visibility",
+    shortLabel: "Visibility",
+    icon: "ðŸŒ",
+    description: "Sensor deployment mode, capture reach, and IPS enforcement proof.",
+  },
+  {
+    id: "security-tools",
+    path: "/security-tools",
+    label: "Security Tools",
+    shortLabel: "Security Tools",
+    icon: "🔧",
+    description: "Reserved route for future enrichment and analyst tooling.",
   },
 ];

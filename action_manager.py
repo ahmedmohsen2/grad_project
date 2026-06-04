@@ -35,6 +35,7 @@ from db import (
     sync_update_host_status  as update_host_status,
     sync_insert_alert        as insert_alert,
 )
+from host_actions import execute_host_action
 
 log = logging.getLogger("ActionManager")
 
@@ -99,6 +100,21 @@ def _db_action(ip: str, action_type: str, reason: str, block: bool = False, new_
     """
     def _write():
         try:
+            if action_type.upper() in {"BLOCK", "ISOLATE", "UNBLOCK"}:
+                payload, status_code = execute_host_action(
+                    action=action_type.upper(),
+                    target=ip,
+                    reason=reason,
+                    source="auto",
+                    confidence=1.0,
+                    trigger="action_manager",
+                    actor_username="action_manager",
+                    actor_role="service",
+                )
+                if status_code >= 400:
+                    log.error("[DB ACTION] host action failed for %s: %s", ip, payload)
+                return
+
             upsert_host(ip)
             insert_action(ip, action_type, reason)
             if block:

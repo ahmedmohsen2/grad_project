@@ -9,12 +9,14 @@ predict.py — Smart Model Loader (Binary + Multi-Class Auto-Detection)
 """
 
 import os
+import time
 import joblib
 import pandas as pd
 from config import (
     THRESHOLD_HIGH_ATTACK, THRESHOLD_MEDIUM_ATTACK, THRESHOLD_SUSPICIOUS,
     ATTACK_CLASS_NAMES,
 )
+from performance_monitor import performance_monitor
 
 # ==============================================================================
 # MODEL LOADING — Auto-detect multiclass vs binary
@@ -75,7 +77,9 @@ def predict(sample_dict: dict) -> dict:
         }
     """
     try:
+        detection_started = time.perf_counter()
         sample = preprocess(sample_dict)
+        inference_started = time.perf_counter()
 
         # ── Isolation Forest ──────────────────────────────────────────────────
         iso_raw = iso_model.predict(sample)[0]
@@ -121,12 +125,35 @@ def predict(sample_dict: dict) -> dict:
                 result = "NORMAL"
                 attack_type_safe = "BENIGN"
 
+        inference_ms = (time.perf_counter() - inference_started) * 1000
+        detection_ms = (time.perf_counter() - detection_started) * 1000
+        performance_monitor.record(
+            "ai_inference_time",
+            inference_ms,
+            model_mode="multiclass" if _use_multiclass else "binary",
+            attack_type=attack_type_safe,
+            result=result,
+            source="predict.py",
+        )
+        performance_monitor.record(
+            "detection_latency",
+            detection_ms,
+            model_mode="multiclass" if _use_multiclass else "binary",
+            attack_type=attack_type_safe,
+            result=result,
+            source="predict.py",
+        )
+
         return {
             "result":      result,
             "attack_type": attack_type_safe,
             "confidence":  confidence,
             "iso_flag":    iso,
             "class_id":    class_id,
+            "timing": {
+                "ai_inference_ms": round(inference_ms, 3),
+                "detection_latency_ms": round(detection_ms, 3),
+            },
         }
 
     except Exception as e:

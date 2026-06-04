@@ -1,5 +1,8 @@
 node_modules/
 __pycache__/
-.env
+.venv/
+.tmp/
+logs/
+backups/
 dataset/
 *.pkl

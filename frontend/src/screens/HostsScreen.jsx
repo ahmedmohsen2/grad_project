@@ -10,9 +10,10 @@ function sourceTone(source) {
 }
 
 function statusTone(status) {
-  if (status === "COMPROMISED") return "danger";
+  if (status === "COMPROMISED" || status === "BLOCKED") return "danger";
   if (status === "MONITORED") return "warning";
   if (status === "ISOLATED") return "info";
+  if (status === "TRUSTED") return "success";
   return "success";
 }
 
@@ -38,6 +39,8 @@ function HostsScreen({ soc, selectedIp, onSelectIp }) {
     setActiveAction(action);
     try {
       await soc.triggerHostAction(action, focusHost.ip);
+    } catch {
+      // useSocData shows the error toast and refreshes authoritative state.
     } finally {
       setActiveAction(null);
     }
@@ -50,9 +53,22 @@ function HostsScreen({ soc, selectedIp, onSelectIp }) {
         subtitle="Hosts"
         rightSlot={
           <div className="flex items-center gap-3">
-            {soc.autoResponseEnabled ? <StatusBadge label="AUTO RESPONSE ACTIVE" tone="warning" /> : null}
+            {/* Clickable Auto-Response Toggle */}
+            <button
+              type="button"
+              onClick={() => soc.toggleAutoResponse(!soc.autoResponseEnabled)}
+              className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-bold transition-all duration-200 ${
+                soc.autoResponseEnabled
+                  ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+                  : "border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20"
+              }`}
+              title="Click to toggle auto-response enforcement"
+            >
+              <span className={`live-dot ${soc.autoResponseEnabled ? "" : "danger"}`} />
+              AUTO-RESPONSE: {soc.autoResponseEnabled ? "ON" : "OFF"}
+            </button>
             <StatusBadge label={`PENTEST ${String(soc.pentestMode || "lab").toUpperCase()}`} tone="info" />
-            <SelectField value={filter} onChange={setFilter} options={["ALL", "CLEAN", "MONITORED", "COMPROMISED", "ISOLATED"]} />
+            <SelectField value={filter} onChange={setFilter} options={["ALL", "CLEAN", "TRUSTED", "MONITORED", "COMPROMISED", "BLOCKED", "ISOLATED"]} />
           </div>
         }
       >

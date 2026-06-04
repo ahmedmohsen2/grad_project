@@ -83,6 +83,7 @@ class AutoResponseEngine:
             return AutoResponseDecision(None, "Missing IP address", confidence)
 
         with self._lock:
+            self._prune_locked(time.time())
             if not self.enabled:
                 return AutoResponseDecision(None, "Auto-response disabled", confidence)
 
@@ -101,81 +102,48 @@ class AutoResponseEngine:
 
         if confidence > 0.9 and attack_type in {"brute_force", "ddos", "bruteforce"}:
             return AutoResponseDecision(
-                "block",
+                "BLOCK",
                 "High confidence brute force or DDoS pattern with repeated behavior",
                 confidence,
             )
 
         if confidence > 0.75 and pps >= self.high_pps_threshold and repeated_behavior:
             return AutoResponseDecision(
-                "isolate",
+                "ISOLATE",
                 "Elevated traffic intensity and repeated abnormal behavior detected",
                 confidence,
             )
 
         if confidence < 0.3:
             return AutoResponseDecision(
-                "whitelist",
+                "WHITELIST",
                 "Low confidence activity observed repeatedly and considered safe",
                 confidence,
             )
 
         return AutoResponseDecision(None, "No safe auto action selected", confidence)
 
-    def evaluate_finding(self, payload: dict) -> AutoResponseDecision:
-        ip = str(payload.get("ip") or "").strip()
-        confidence = float(payload.get("confidence") or 0.0)
-        severity = str(payload.get("severity") or "").lower()
-        title = str(payload.get("title") or "pentest finding").strip()
-
-        if not ip:
-            return AutoResponseDecision(None, "Missing target for pentest finding", confidence, "pentest_finding")
-
-        with self._lock:
-            if not self.enabled:
-                return AutoResponseDecision(None, "Auto-response disabled", confidence, "pentest_finding")
-
-            last_action = self._last_action_at.get(ip, 0.0)
-            if time.time() - last_action < self.cooldown_sec:
-                return AutoResponseDecision(None, "Cooldown active for this target", confidence, "pentest_finding")
-
-            window = self._action_windows[ip]
-            while window and time.time() - window[0] > 3600:
-                window.popleft()
-            if len(window) >= self.max_actions_per_ip:
-                return AutoResponseDecision(None, "Max actions reached for this target in the current window", confidence, "pentest_finding")
-
-        if severity == "critical" and confidence >= 0.7:
-            return AutoResponseDecision(
-                "isolate",
-                f"Critical pentest finding detected for {title}; safe-mode isolation is recommended",
-                confidence,
-                "pentest_finding",
-            )
-
-        if severity == "high" and confidence >= 0.65:
-            return AutoResponseDecision(
-                "block",
-                f"High-severity pentest finding detected for {title}; safe-mode blocking is recommended",
-                confidence,
-                "pentest_finding",
-            )
-
-        if severity == "medium" and confidence >= 0.9:
-            return AutoResponseDecision(
-                "block",
-                f"Medium-severity finding reached a very high confidence threshold for {title}",
-                confidence,
-                "pentest_finding",
-            )
-
-        return AutoResponseDecision(None, "No safe pentest auto action selected", confidence, "pentest_finding")
 
     def mark_action(self, ip: str):
         now = time.time()
         with self._lock:
+            self._prune_locked(now)
             self._last_action_at[ip] = now
             self._action_windows[ip].append(now)
+
+    def _prune_locked(self, now: float):
+        cutoff = max(self.cooldown_sec * 4, 3600)
+        for ip, last_seen in list(self._last_action_at.items()):
+            if now - last_seen > cutoff and not self._action_windows.get(ip):
+                self._last_action_at.pop(ip, None)
+        for ip, window in list(self._action_windows.items()):
+            while window and now - window[0] > 3600:
+                window.popleft()
+            if not window and now - self._last_action_at.get(ip, 0) > cutoff:
+                self._action_windows.pop(ip, None)
+        for ip, history in list(self._history.items()):
+            if not history or now - history[-1]["time"] > cutoff:
+                self._history.pop(ip, None)
 
     def evaluate_finding(self, payload: dict) -> AutoResponseDecision:
         """
@@ -190,6 +158,7 @@ class AutoResponseEngine:
             return AutoResponseDecision(None, "Missing IP address", confidence)
 
         with self._lock:
+            self._prune_locked(time.time())
             if not self.enabled:
                 return AutoResponseDecision(None, "Auto-response disabled", confidence)
 

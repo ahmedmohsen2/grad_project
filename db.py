@@ -36,23 +36,43 @@ Logging levels:
 from __future__ import annotations
 
 import asyncio
+import sys as _sys
+
+# FIXED: On Windows, subprocesses require the ProactorEventLoop.
+if _sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
+
 import logging
 import concurrent.futures          # FIXED: needed for safe thread-pool bridge
 import threading                   # FIXED: dual-lock cooldown
 import time
+import os
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 import asyncpg
 from asyncpg import Pool
+from dotenv import load_dotenv
+from detection_schema import normalize_attack_label, normalize_detection_result
+from performance_monitor import performance_monitor
+
+load_dotenv()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
 
-DB_DSN        = "postgresql://postgres:123@localhost:5432/ids_system"
-POOL_MIN_SIZE = 5
-POOL_MAX_SIZE = 20
+_DB_USER = os.getenv("DB_USER", "postgres")
+_DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
+_DB_HOST = os.getenv("DB_HOST", "localhost")
+_DB_PORT = os.getenv("DB_PORT", "5432")
+_DB_NAME = os.getenv("DB_NAME", "ids_system")
+DB_DSN        = os.getenv("DB_DSN") or f"postgresql://{_DB_USER}:{_DB_PASSWORD}@{_DB_HOST}:{_DB_PORT}/{_DB_NAME}"
+POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
 
 # Alert cooldown — same (ip, alert_type) will not produce a row for N seconds
 ALERT_COOLDOWN_SEC = 60
@@ -141,9 +161,15 @@ async def _execute(query: str, *args: Any) -> bool:
     if pool is None:
         log.error("[DB ERROR] _execute called but pool is not initialised.")
         return False
+    started = time.perf_counter()
     try:
         async with pool.acquire() as conn:
             await conn.execute(query, *args)
+        performance_monitor.record(
+            "db_query_time",
+            (time.perf_counter() - started) * 1000,
+            operation="execute",
+        )
         return True
     except asyncpg.UniqueViolationError:
         # ON CONFLICT DO NOTHING equivalent — not a real error
@@ -163,9 +189,16 @@ async def _fetchall(query: str, *args: Any) -> list[dict]:
     pool = get_pool()
     if pool is None:
         return []
+    started = time.perf_counter()
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(query, *args)
+        performance_monitor.record(
+            "db_query_time",
+            (time.perf_counter() - started) * 1000,
+            operation="fetchall",
+            rows=len(rows),
+        )
         # asyncpg Record supports dict-like access; convert explicitly
         return [dict(row) for row in rows]
     except Exception as exc:
@@ -181,9 +214,16 @@ async def _fetchone(query: str, *args: Any) -> Optional[dict]:
     pool = get_pool()
     if pool is None:
         return None
+    started = time.perf_counter()
     try:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(query, *args)
+        performance_monitor.record(
+            "db_query_time",
+            (time.perf_counter() - started) * 1000,
+            operation="fetchone",
+            rows=1 if row else 0,
+        )
         return dict(row) if row else None
     except Exception as exc:
         log.error(f"[DB ERROR] _fetchone failed: {exc} | SQL: {query[:80]}")
@@ -199,9 +239,16 @@ async def _fetchval(query: str, *args: Any) -> Any:
     pool = get_pool()
     if pool is None:
         return None
+    started = time.perf_counter()
     try:
         async with pool.acquire() as conn:
-            return await conn.fetchval(query, *args)
+            value = await conn.fetchval(query, *args)
+        performance_monitor.record(
+            "db_query_time",
+            (time.perf_counter() - started) * 1000,
+            operation="fetchval",
+        )
+        return value
     except Exception as exc:
         log.error(f"[DB ERROR] _fetchval failed: {exc} | SQL: {query[:80]}")
         return None
@@ -336,13 +383,18 @@ async def insert_detection(
     Store one ML / rule-based detection result.
     Table: detections(src_ip, result, attack_type, confidence, iso_flag, detected_at)
     """
+    normalized_result = normalize_detection_result(result, attack_type)
+    normalized_attack_type = normalize_attack_label(attack_type, normalized_result)
+    if normalized_result == "NORMAL":
+        normalized_attack_type = "BENIGN"
+
     ok = await _execute(
         """
         INSERT INTO detections
             (src_ip, result, attack_type, confidence, iso_flag, detected_at)
         VALUES ($1, $2, $3, $4, $5, NOW())
         """,
-        src_ip, result, attack_type, float(confidence), int(iso_flag),
+        src_ip, normalized_result, normalized_attack_type, float(confidence), int(iso_flag),
     )
     if ok:
         log.debug(
@@ -352,34 +404,21 @@ async def insert_detection(
     return ok
 
 
-async def insert_action(
-    ip:          str,
-    action_type: str,
-    reason:      str = "",
-) -> bool:
-    """
-    Log an IPS action against an IP.
-    Table: actions(ip, action_type, reason, acted_at)
-    """
-    ok = await _execute(
-        "INSERT INTO actions (ip, action_type, reason, acted_at) VALUES ($1, $2, $3, NOW())",
-        ip, action_type.upper(), reason[:500],
-    )
-    if ok:
-        log.info(f"[DB] action — ip={ip} action={action_type}")
-    return ok
+# [CONSOLIDATED] insert_action v1 removed — canonical definition below (with source + confidence).
 
 
 async def insert_blocked_ip(ip: str, reason: str = "") -> bool:
     """
-    Insert into blocked_ips. ON CONFLICT DO NOTHING prevents duplicates.
+    Insert or refresh a firewall block entry.
     Table: blocked_ips(ip UNIQUE, reason, blocked_at)
     """
     ok = await _execute(
         """
         INSERT INTO blocked_ips (ip, reason, blocked_at)
         VALUES ($1, $2, NOW())
-        ON CONFLICT (ip) DO NOTHING
+        ON CONFLICT (ip) DO UPDATE
+            SET reason = EXCLUDED.reason,
+                blocked_at = NOW()
         """,
         ip, reason[:500],
     )
@@ -528,6 +567,16 @@ async def get_alerts(
             row["created_at"] = row["created_at"].isoformat()
         if row.get("time") and hasattr(row["time"], "isoformat"):
             row["time"] = row["time"].isoformat()
+        if isinstance(row.get("metadata"), str):
+            try:
+                import json as _json
+                parsed = _json.loads(row["metadata"])
+                row["metadata"] = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                log.warning("[DB] malformed alert metadata ignored for id=%s", row.get("id"))
+                row["metadata"] = {}
+        elif row.get("metadata") is None:
+            row["metadata"] = {}
 
     return rows
 
@@ -550,6 +599,47 @@ async def mark_alert_read(alert_id: int) -> bool:
     if ok:
         log.debug(f"[DB] alert read — id={alert_id}")
     return ok
+
+
+async def mark_all_alerts_read() -> dict:
+    """
+    Mark all currently unread alerts as read.
+    Preserves alert rows, metadata, and activity history.
+    """
+    pool = get_pool()
+    if pool is None:
+        return {"success": False, "updated": 0, "timestamp": None}
+
+    timestamp = None
+    updated = 0
+    started = time.perf_counter()
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                WITH updated AS (
+                    UPDATE alerts
+                       SET is_read = TRUE
+                     WHERE is_read = FALSE
+                     RETURNING id
+                )
+                SELECT COUNT(*)::int AS updated, NOW() AS timestamp
+                FROM updated
+                """
+            )
+        performance_monitor.record(
+            "db_query_time",
+            (time.perf_counter() - started) * 1000,
+            operation="mark_all_alerts_read",
+        )
+        updated = int(row["updated"] or 0) if row else 0
+        timestamp_value = row["timestamp"] if row else None
+        timestamp = timestamp_value.isoformat() if hasattr(timestamp_value, "isoformat") else None
+        log.info("[DB] alerts marked read - updated=%s", updated)
+        return {"success": True, "updated": updated, "timestamp": timestamp}
+    except Exception as exc:
+        log.error("[DB ERROR] mark_all_alerts_read failed: %s", exc)
+        return {"success": False, "updated": 0, "timestamp": timestamp}
 
 
 async def get_alerts_count(unread_only: bool = False) -> int:
@@ -629,25 +719,7 @@ async def get_flows(
     return rows
 
 
-async def get_actions(limit: int = 20, offset: int = 0) -> list[dict]:
-    """
-    Return recent IPS actions ordered by acted_at DESC.
-    Keys: id, ip, action_type, reason, acted_at
-    """
-    limit = min(int(limit), 200)
-    rows = await _fetchall(
-        """
-        SELECT id, ip, action_type, reason, acted_at
-        FROM actions
-        ORDER BY acted_at DESC
-        LIMIT $1 OFFSET $2
-        """,
-        int(limit), int(offset),
-    )
-    for row in rows:
-        if row.get("acted_at") and hasattr(row["acted_at"], "isoformat"):
-            row["acted_at"] = row["acted_at"].isoformat()
-    return rows
+# [CONSOLIDATED] get_actions v1 removed — canonical definition below (with source + confidence).
 
 
 async def get_blocked_ips() -> list[dict]:
@@ -681,48 +753,7 @@ async def db_ping() -> bool:
         return False
 
 
-async def upsert_action_control(
-    target: str,
-    *,
-    action: str,
-    reason: str = "",
-    source: str = "system",
-) -> bool:
-    """
-    Persist the latest simulated containment state for a target.
-    """
-    action_upper = action.upper()
-    is_blocked = action_upper == "BLOCK"
-    is_isolated = action_upper == "ISOLATE"
-    is_whitelisted = action_upper == "WHITELIST"
-    ok = await _execute(
-        """
-        INSERT INTO action_controls
-            (target, is_blocked, is_isolated, is_whitelisted, is_quarantined,
-             last_action, reason, source, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-        ON CONFLICT (target) DO UPDATE
-            SET is_blocked = EXCLUDED.is_blocked,
-                is_isolated = EXCLUDED.is_isolated,
-                is_whitelisted = EXCLUDED.is_whitelisted,
-                is_quarantined = EXCLUDED.is_quarantined,
-                last_action = EXCLUDED.last_action,
-                reason = EXCLUDED.reason,
-                source = EXCLUDED.source,
-                updated_at = NOW()
-        """,
-        target,
-        is_blocked,
-        is_isolated,
-        is_whitelisted,
-        is_isolated,
-        action_upper,
-        reason[:500],
-        source[:100],
-    )
-    if ok:
-        log.info(f"[DB] action control - target={target} action={action_upper}")
-    return ok
+# [CONSOLIDATED] upsert_action_control v1 removed — canonical definition below (with confidence + trigger).
 
 
 async def get_action_control(target: str) -> Optional[dict]:
@@ -746,12 +777,63 @@ async def ensure_runtime_schema() -> bool:
     Safe to call repeatedly at startup.
     """
     statements = [
+        """
+        CREATE TABLE IF NOT EXISTS pentest_scans (
+            scan_id TEXT PRIMARY KEY,
+            target TEXT NOT NULL,
+            scan_type TEXT NOT NULL DEFAULT 'quick',
+            status TEXT NOT NULL DEFAULT 'queued',
+            progress INTEGER NOT NULL DEFAULT 0,
+            current_stage TEXT NOT NULL DEFAULT 'queued',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at TIMESTAMPTZ,
+            results JSONB,
+            triggered_by TEXT NOT NULL DEFAULT 'user'
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS actions (
+            id BIGSERIAL PRIMARY KEY,
+            ip TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            reason TEXT,
+            source TEXT NOT NULL DEFAULT 'system',
+            confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+            actor_username TEXT NOT NULL DEFAULT 'system',
+            actor_role TEXT NOT NULL DEFAULT 'service',
+            enforcement_method TEXT NOT NULL DEFAULT 'database',
+            verification_status TEXT NOT NULL DEFAULT 'unknown',
+            real_block_applied BOOLEAN NOT NULL DEFAULT FALSE,
+            database_only BOOLEAN NOT NULL DEFAULT TRUE,
+            inline_block BOOLEAN NOT NULL DEFAULT FALSE,
+            gateway_block BOOLEAN NOT NULL DEFAULT FALSE,
+            rule_exists BOOLEAN NOT NULL DEFAULT FALSE,
+            command_status TEXT NOT NULL DEFAULT 'unknown',
+            enforcement_message TEXT,
+            acted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
         "ALTER TABLE actions ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'system'",
         "ALTER TABLE actions ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS actor_username TEXT NOT NULL DEFAULT 'system'",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS actor_role TEXT NOT NULL DEFAULT 'service'",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS enforcement_method TEXT NOT NULL DEFAULT 'database'",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'unknown'",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS real_block_applied BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS database_only BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS inline_block BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS gateway_block BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS rule_exists BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS command_status TEXT NOT NULL DEFAULT 'unknown'",
+        "ALTER TABLE actions ADD COLUMN IF NOT EXISTS enforcement_message TEXT",
         "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
         "ALTER TABLE pentest_scans ADD COLUMN IF NOT EXISTS progress INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE pentest_scans ADD COLUMN IF NOT EXISTS current_stage TEXT NOT NULL DEFAULT 'queued'",
         "ALTER TABLE pentest_scans ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        "CREATE INDEX IF NOT EXISTS idx_pentest_scans_status ON pentest_scans (status)",
+        "CREATE INDEX IF NOT EXISTS idx_pentest_scans_updated_at ON pentest_scans (updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_pentest_scans_target ON pentest_scans (target)",
         """
         CREATE TABLE IF NOT EXISTS action_controls (
             target TEXT PRIMARY KEY,
@@ -764,12 +846,59 @@ async def ensure_runtime_schema() -> bool:
             source TEXT NOT NULL DEFAULT 'system',
             confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
             trigger TEXT NOT NULL DEFAULT 'manual',
+            enforcement_method TEXT NOT NULL DEFAULT 'database',
+            verification_status TEXT NOT NULL DEFAULT 'unknown',
+            real_block_applied BOOLEAN NOT NULL DEFAULT FALSE,
+            database_only BOOLEAN NOT NULL DEFAULT TRUE,
+            inline_block BOOLEAN NOT NULL DEFAULT FALSE,
+            gateway_block BOOLEAN NOT NULL DEFAULT FALSE,
+            rule_exists BOOLEAN NOT NULL DEFAULT FALSE,
+            command_status TEXT NOT NULL DEFAULT 'unknown',
+            enforcement_message TEXT,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """,
         "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0",
         "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS trigger TEXT NOT NULL DEFAULT 'manual'",
+        "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS enforcement_method TEXT NOT NULL DEFAULT 'database'",
+        "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'unknown'",
+        "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS real_block_applied BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS database_only BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS inline_block BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS gateway_block BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS rule_exists BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS command_status TEXT NOT NULL DEFAULT 'unknown'",
+        "ALTER TABLE action_controls ADD COLUMN IF NOT EXISTS enforcement_message TEXT",
         "CREATE INDEX IF NOT EXISTS idx_action_controls_updated_at ON action_controls (updated_at DESC)",
+        """
+        CREATE TABLE IF NOT EXISTS ips_validation_tests (
+            test_id TEXT PRIMARY KEY,
+            source_ip TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            phase TEXT NOT NULL DEFAULT 'queued',
+            traffic_generated INTEGER NOT NULL DEFAULT 0,
+            flows_generated INTEGER NOT NULL DEFAULT 0,
+            detection_triggered BOOLEAN NOT NULL DEFAULT FALSE,
+            auto_response_action TEXT,
+            block_executed BOOLEAN NOT NULL DEFAULT FALSE,
+            firewall_rule_created BOOLEAN NOT NULL DEFAULT FALSE,
+            verification_passed BOOLEAN NOT NULL DEFAULT FALSE,
+            retest_denied BOOLEAN NOT NULL DEFAULT FALSE,
+            detection_timestamp TIMESTAMPTZ,
+            block_timestamp TIMESTAMPTZ,
+            verification_timestamp TIMESTAMPTZ,
+            rule_name TEXT,
+            rule_exists BOOLEAN NOT NULL DEFAULT FALSE,
+            command_status TEXT NOT NULL DEFAULT 'unknown',
+            enforcement_method TEXT NOT NULL DEFAULT 'database',
+            verification_status TEXT NOT NULL DEFAULT 'unknown',
+            real_block_applied BOOLEAN NOT NULL DEFAULT FALSE,
+            report JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_ips_validation_tests_updated_at ON ips_validation_tests (updated_at DESC)",
         """
         CREATE TABLE IF NOT EXISTS security_findings (
             finding_id TEXT PRIMARY KEY,
@@ -844,33 +973,47 @@ async def ensure_runtime_schema() -> bool:
     return True
 
 
-async def insert_action(
-    ip: str,
-    action_type: str,
-    reason: str = "",
-    source: str = "system",
-) -> bool:
-    """
-    Override that records action source alongside the action log.
-    """
-    ok = await _execute(
-        """
-        INSERT INTO actions (ip, action_type, reason, source, acted_at)
-        VALUES ($1, $2, $3, $4, NOW())
-        """,
-        ip,
-        action_type.upper(),
-        reason[:500],
-        source[:100],
-    )
-    if ok:
-        log.info(f"[DB] action - ip={ip} action={action_type} source={source}")
-    return ok
+# [CONSOLIDATED] insert_action v2 removed — canonical definition below (with source + confidence).
 
 
 def _normalize_finding_row(row: Optional[dict]) -> Optional[dict]:
     if not row:
         return row
+    import json as _json
+
+    def _decode_json_field(value, expected_type, fallback):
+        decoded = value
+        for _ in range(2):
+            if not isinstance(decoded, str):
+                break
+            try:
+                decoded = _json.loads(decoded)
+            except (_json.JSONDecodeError, TypeError):
+                return fallback
+        return decoded if isinstance(decoded, expected_type) else fallback
+
+    timeline = _decode_json_field(row.get("timeline"), list, [])
+    if timeline and all(isinstance(item, str) and len(item) == 1 for item in timeline):
+        timeline = _decode_json_field("".join(timeline), list, [])
+    if isinstance(timeline, list):
+        timeline = [item for item in timeline if isinstance(item, dict)]
+    row["timeline"] = timeline
+
+    metadata = row.get("metadata")
+    row["metadata"] = _decode_json_field(metadata, dict, {})
+    for key in (
+        "classification",
+        "validation_status",
+        "evidence_source",
+        "related_port",
+        "protocol",
+        "detection_method",
+        "confidence_type",
+        "validation_label",
+    ):
+        if key not in row and key in row["metadata"]:
+            row[key] = row["metadata"].get(key)
+
     for ts_key in (
         "first_seen_at",
         "last_seen_at",
@@ -926,6 +1069,15 @@ async def upsert_security_finding(record: dict) -> bool:
 
     if not record.get("finding_id") or not record.get("fingerprint"):
         return False
+
+    from datetime import datetime
+    def _parse_ts(ts):
+        if isinstance(ts, str):
+            try:
+                return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return ts
 
     ok = await _execute(
         """
@@ -990,12 +1142,12 @@ async def upsert_security_finding(record: dict) -> bool:
         record.get("action_reason"),
         record.get("action_source"),
         record.get("revalidation_scan_id"),
-        record.get("last_action_at"),
-        record.get("last_retested_at"),
-        record.get("first_seen_at"),
-        record.get("last_seen_at"),
-        record.get("resolved_at"),
-        record.get("updated_at"),
+        _parse_ts(record.get("last_action_at")),
+        _parse_ts(record.get("last_retested_at")),
+        _parse_ts(record.get("first_seen_at")),
+        _parse_ts(record.get("last_seen_at")),
+        _parse_ts(record.get("resolved_at")),
+        _parse_ts(record.get("updated_at")),
         _json.dumps(record.get("timeline") or [], default=str),
         _json.dumps(record.get("metadata") or {}, default=str),
     )
@@ -1006,24 +1158,7 @@ async def upsert_security_finding(record: dict) -> bool:
     return ok
 
 
-async def get_actions(limit: int = 20, offset: int = 0) -> list[dict]:
-    """
-    Override that exposes action source in API responses.
-    """
-    limit = min(int(limit), 200)
-    rows = await _fetchall(
-        """
-        SELECT id, ip, action_type, reason, source, acted_at
-        FROM actions
-        ORDER BY acted_at DESC
-        LIMIT $1 OFFSET $2
-        """,
-        int(limit), int(offset),
-    )
-    for row in rows:
-        if row.get("acted_at") and hasattr(row["acted_at"], "isoformat"):
-            row["acted_at"] = row["acted_at"].isoformat()
-    return rows
+# [CONSOLIDATED] get_actions v2 removed — canonical definition below (with source + confidence).
 
 
 async def update_pentest_scan(
@@ -1036,9 +1171,11 @@ async def update_pentest_scan(
     completed_at: Optional[str] = None,
 ) -> bool:
     """
-    Override that stores scan progress metadata and refreshes updated_at.
+    Update pentest scan — progress, stage, status, results and completed_at.
+    Refreshes updated_at on every call.
     """
     import json as _json
+    from datetime import datetime, timezone
 
     parts, vals = [], []
     if status:
@@ -1054,16 +1191,34 @@ async def update_pentest_scan(
         parts.append("results = $" + str(len(vals) + 1) + "::jsonb")
         vals.append(_json.dumps(results, default=str))
     if completed_at:
-        parts.append("completed_at = $" + str(len(vals) + 1) + "::timestamptz")
-        vals.append(completed_at)
+        # asyncpg requires a datetime object, not a string
+        if isinstance(completed_at, str):
+            try:
+                # Handle both "Z" suffix and "+00:00" suffix
+                ts_str = completed_at.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(ts_str)
+            except (ValueError, TypeError):
+                dt = datetime.now(tz=timezone.utc)
+        else:
+            dt = completed_at
+        parts.append("completed_at = $" + str(len(vals) + 1))
+        vals.append(dt)
     parts.append("updated_at = NOW()")
+
+    if not parts or parts == ["updated_at = NOW()"]:
+        # Nothing meaningful to update
+        return True
 
     vals.append(scan_id)
     sql = f"UPDATE pentest_scans SET {', '.join(parts)} WHERE scan_id = ${len(vals)}"
     ok = await _execute(sql, *vals)
     if ok:
-        log.debug(f"[DB] pentest scan updated - id={scan_id} status={status} stage={current_stage} progress={progress}")
+        log.debug(
+            "[DB] pentest scan updated - id=%s status=%s stage=%s progress=%s",
+            scan_id, status, current_stage, progress,
+        )
     return ok
+
 
 
 async def get_pentest_scan(scan_id: str) -> Optional[dict]:
@@ -1130,6 +1285,15 @@ async def upsert_action_control(
     source: str = "manual",
     confidence: float = 0.0,
     trigger: str = "manual",
+    enforcement_method: str = "database",
+    verification_status: str = "unknown",
+    real_block_applied: bool = False,
+    database_only: bool = True,
+    inline_block: bool = False,
+    gateway_block: bool = False,
+    rule_exists: bool = False,
+    command_status: str = "unknown",
+    enforcement_message: str = "",
 ) -> bool:
     """
     Override that stores explainable action metadata and source/trigger.
@@ -1142,8 +1306,11 @@ async def upsert_action_control(
         """
         INSERT INTO action_controls
             (target, is_blocked, is_isolated, is_whitelisted, is_quarantined,
-             last_action, reason, source, confidence, trigger, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+             last_action, reason, source, confidence, trigger,
+             enforcement_method, verification_status, real_block_applied,
+             database_only, inline_block, gateway_block, rule_exists,
+             command_status, enforcement_message, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
         ON CONFLICT (target) DO UPDATE
             SET is_blocked = EXCLUDED.is_blocked,
                 is_isolated = EXCLUDED.is_isolated,
@@ -1154,6 +1321,15 @@ async def upsert_action_control(
                 source = EXCLUDED.source,
                 confidence = EXCLUDED.confidence,
                 trigger = EXCLUDED.trigger,
+                enforcement_method = EXCLUDED.enforcement_method,
+                verification_status = EXCLUDED.verification_status,
+                real_block_applied = EXCLUDED.real_block_applied,
+                database_only = EXCLUDED.database_only,
+                inline_block = EXCLUDED.inline_block,
+                gateway_block = EXCLUDED.gateway_block,
+                rule_exists = EXCLUDED.rule_exists,
+                command_status = EXCLUDED.command_status,
+                enforcement_message = EXCLUDED.enforcement_message,
                 updated_at = NOW()
         """,
         target,
@@ -1166,6 +1342,15 @@ async def upsert_action_control(
         source[:100],
         float(confidence),
         trigger[:50],
+        enforcement_method[:100],
+        verification_status[:50],
+        bool(real_block_applied),
+        bool(database_only),
+        bool(inline_block),
+        bool(gateway_block),
+        bool(rule_exists),
+        command_status[:50],
+        enforcement_message[:1000],
     )
     if ok:
         log.info(f"[DB] action control - target={target} action={action_upper} source={source} trigger={trigger}")
@@ -1176,7 +1361,10 @@ async def get_action_control(target: str) -> Optional[dict]:
     row = await _fetchone(
         """
         SELECT target, is_blocked, is_isolated, is_whitelisted, is_quarantined,
-               last_action, reason, source, confidence, trigger, updated_at
+               last_action, reason, source, confidence, trigger,
+               enforcement_method, verification_status, real_block_applied,
+               database_only, inline_block, gateway_block, rule_exists,
+               command_status, enforcement_message, updated_at
         FROM action_controls
         WHERE target = $1
         """,
@@ -1193,31 +1381,158 @@ async def insert_action(
     reason: str = "",
     source: str = "manual",
     confidence: float = 0.0,
+    actor_username: str = "system",
+    actor_role: str = "service",
+    enforcement_method: str = "database",
+    verification_status: str = "unknown",
+    real_block_applied: bool = False,
+    database_only: bool = True,
+    inline_block: bool = False,
+    gateway_block: bool = False,
+    rule_exists: bool = False,
+    command_status: str = "unknown",
+    enforcement_message: str = "",
 ) -> bool:
     """
     Override that records action source and confidence in the action log.
     """
     ok = await _execute(
         """
-        INSERT INTO actions (ip, action_type, reason, source, confidence, acted_at)
-        VALUES ($1, $2, $3, $4, $5, NOW())
+        INSERT INTO actions
+            (ip, action_type, reason, source, confidence, actor_username, actor_role,
+             enforcement_method, verification_status, real_block_applied,
+             database_only, inline_block, gateway_block, rule_exists,
+             command_status, enforcement_message, acted_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
         """,
         ip,
         action_type.upper(),
         reason[:500],
         source[:100],
         float(confidence),
+        actor_username[:100],
+        actor_role[:50],
+        enforcement_method[:100],
+        verification_status[:50],
+        bool(real_block_applied),
+        bool(database_only),
+        bool(inline_block),
+        bool(gateway_block),
+        bool(rule_exists),
+        command_status[:50],
+        enforcement_message[:1000],
     )
     if ok:
         log.info(f"[DB] action - ip={ip} action={action_type} source={source} confidence={confidence:.2f}")
     return ok
 
 
+async def upsert_ips_validation_test(record: dict) -> bool:
+    import json as _json
+
+    ok = await _execute(
+        """
+        INSERT INTO ips_validation_tests
+            (test_id, source_ip, status, phase, traffic_generated, flows_generated,
+             detection_triggered, auto_response_action, block_executed,
+             firewall_rule_created, verification_passed, retest_denied,
+             detection_timestamp, block_timestamp, verification_timestamp,
+             rule_name, rule_exists, command_status, enforcement_method,
+             verification_status, real_block_applied, report, created_at, updated_at)
+        VALUES
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+             $13::timestamptz, $14::timestamptz, $15::timestamptz,
+             $16, $17, $18, $19, $20, $21, $22::jsonb, NOW(), NOW())
+        ON CONFLICT (test_id) DO UPDATE
+            SET source_ip = EXCLUDED.source_ip,
+                status = EXCLUDED.status,
+                phase = EXCLUDED.phase,
+                traffic_generated = EXCLUDED.traffic_generated,
+                flows_generated = EXCLUDED.flows_generated,
+                detection_triggered = EXCLUDED.detection_triggered,
+                auto_response_action = EXCLUDED.auto_response_action,
+                block_executed = EXCLUDED.block_executed,
+                firewall_rule_created = EXCLUDED.firewall_rule_created,
+                verification_passed = EXCLUDED.verification_passed,
+                retest_denied = EXCLUDED.retest_denied,
+                detection_timestamp = EXCLUDED.detection_timestamp,
+                block_timestamp = EXCLUDED.block_timestamp,
+                verification_timestamp = EXCLUDED.verification_timestamp,
+                rule_name = EXCLUDED.rule_name,
+                rule_exists = EXCLUDED.rule_exists,
+                command_status = EXCLUDED.command_status,
+                enforcement_method = EXCLUDED.enforcement_method,
+                verification_status = EXCLUDED.verification_status,
+                real_block_applied = EXCLUDED.real_block_applied,
+                report = EXCLUDED.report,
+                updated_at = NOW()
+        """,
+        record.get("test_id"),
+        record.get("source_ip"),
+        record.get("status", "queued"),
+        record.get("phase", "queued"),
+        int(record.get("traffic_generated") or 0),
+        int(record.get("flows_generated") or 0),
+        bool(record.get("detection_triggered")),
+        record.get("auto_response_action"),
+        bool(record.get("block_executed")),
+        bool(record.get("firewall_rule_created")),
+        bool(record.get("verification_passed")),
+        bool(record.get("retest_denied")),
+        record.get("detection_timestamp"),
+        record.get("block_timestamp"),
+        record.get("verification_timestamp"),
+        record.get("rule_name"),
+        bool(record.get("rule_exists")),
+        (record.get("command_status") or "unknown")[:50],
+        (record.get("enforcement_method") or "database")[:100],
+        (record.get("verification_status") or "unknown")[:50],
+        bool(record.get("real_block_applied")),
+        _json.dumps(record.get("report") or {}, default=str),
+    )
+    if ok:
+        log.info(f"[DB] ips validation test - id={record.get('test_id')} status={record.get('status')}")
+    return ok
+
+
+async def get_ips_validation_tests(limit: int = 10) -> list[dict]:
+    rows = await _fetchall(
+        """
+        SELECT *
+        FROM ips_validation_tests
+        ORDER BY updated_at DESC
+        LIMIT $1
+        """,
+        min(int(limit), 50),
+    )
+    for row in rows:
+        for key in ("detection_timestamp", "block_timestamp", "verification_timestamp", "created_at", "updated_at"):
+            if row.get(key) and hasattr(row[key], "isoformat"):
+                row[key] = row[key].isoformat()
+        if isinstance(row.get("report"), str):
+            try:
+                import json as _json
+                parsed = _json.loads(row["report"])
+                row["report"] = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                row["report"] = {}
+        elif row.get("report") is None:
+            row["report"] = {}
+    return rows
+
+
+async def clear_ips_validation_tests() -> bool:
+    return await _execute("DELETE FROM ips_validation_tests")
+
+
 async def get_actions(limit: int = 20, offset: int = 0) -> list[dict]:
     limit = min(int(limit), 200)
     rows = await _fetchall(
         """
-        SELECT id, ip, action_type, reason, source, confidence, acted_at
+        SELECT id, ip, action_type, reason, source, confidence,
+               actor_username, actor_role, enforcement_method, verification_status,
+               real_block_applied, database_only, inline_block, gateway_block,
+               rule_exists, command_status, enforcement_message, acted_at
         FROM actions
         ORDER BY acted_at DESC
         LIMIT $1 OFFSET $2
@@ -1248,12 +1563,7 @@ def sync_insert_detection(src_ip, result, attack_type, confidence, iso_flag=0) -
     except Exception:
         return False
 
-def sync_insert_action(ip: str, action_type: str, reason: str = "") -> bool:
-    """Sync bridge → insert_action()"""
-    try:
-        return _run_async(insert_action(ip, action_type, reason)) or False
-    except Exception:
-        return False
+# [CONSOLIDATED] sync_insert_action v1 (3-arg) removed — canonical 5-arg definition below with source + confidence.
 
 def sync_insert_blocked_ip(ip: str, reason: str = "") -> bool:
     """Sync bridge → insert_blocked_ip()"""
@@ -1271,11 +1581,10 @@ def sync_remove_blocked_ip(ip: str) -> bool:
 
 def sync_insert_flow(src_ip, dst_ip, packets, bytes_, pps, duration) -> bool:
     """Sync bridge → insert_flow()"""
-    print("[DEBUG] flow insert called")
     try:
         return _run_async(insert_flow(src_ip, dst_ip, packets, bytes_, pps, duration)) or False
     except Exception as e:
-        print(f"[DB ERROR] flow insert skipped safely: {e}")
+        log.error("[DB ERROR] flow insert skipped safely: %s", e)
         return False
 
 def sync_upsert_host(ip: str, status: str = "SEEN") -> bool:
@@ -1336,6 +1645,17 @@ def sync_mark_alert_read(alert_id: int) -> bool:
     except Exception:
         return False
 
+def sync_mark_all_alerts_read() -> dict:
+    """Sync bridge -> mark_all_alerts_read()"""
+    try:
+        return _run_async(mark_all_alerts_read()) or {
+            "success": False,
+            "updated": 0,
+            "timestamp": None,
+        }
+    except Exception:
+        return {"success": False, "updated": 0, "timestamp": None}
+
 def sync_db_ping() -> bool:
     """Sync bridge → db_ping()"""
     try:
@@ -1367,6 +1687,24 @@ def sync_get_actions(limit: int = 20, offset: int = 0) -> list:
     except Exception:
         return []
 
+def sync_upsert_ips_validation_test(record: dict) -> bool:
+    try:
+        return _run_async(upsert_ips_validation_test(record), timeout=10.0) or False
+    except Exception:
+        return False
+
+def sync_get_ips_validation_tests(limit: int = 10) -> list:
+    try:
+        return _run_async(get_ips_validation_tests(limit=limit), timeout=10.0) or []
+    except Exception:
+        return []
+
+def sync_clear_ips_validation_tests() -> bool:
+    try:
+        return _run_async(clear_ips_validation_tests(), timeout=10.0) or False
+    except Exception:
+        return False
+
 def sync_get_blocked_ips() -> list:
     """Sync bridge → get_blocked_ips()"""
     try:
@@ -1375,133 +1713,27 @@ def sync_get_blocked_ips() -> list:
         return []
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# PENTEST SCAN CRUD (PostgreSQL)
-# ──────────────────────────────────────────────────────────────────────────────
-
-async def insert_pentest_scan(
-    scan_id:      str,
-    target:       str,
-    scan_type:    str = "quick",
-    triggered_by: str = "user",
-) -> bool:
-    """
-    Create a new pentest scan record.
-    Table: pentest_scans(scan_id, target, scan_type, status, created_at, triggered_by)
-    """
-    ok = await _execute(
-        """
-        INSERT INTO pentest_scans
-            (scan_id, target, scan_type, status, created_at, triggered_by)
-        VALUES ($1, $2, $3, 'queued', NOW(), $4)
-        """,
-        scan_id, target, scan_type, triggered_by,
-    )
-    if ok:
-        log.info(f"[DB] pentest scan created — id={scan_id} target={target} type={scan_type}")
-    return ok
-
-
-async def update_pentest_scan(
-    scan_id:      str,
-    *,
-    status:       Optional[str] = None,
-    results:      Optional[dict] = None,
-    completed_at: Optional[str] = None,
-) -> bool:
-    """
-    Update pentest scan status and/or results.
-    Results are stored as JSONB.
-    """
-    import json as _json
-
-    parts, vals = [], []
-    if status:
-        parts.append("status = $" + str(len(vals) + 1))
-        vals.append(status)
-    if results is not None:
-        parts.append("results = $" + str(len(vals) + 1) + "::jsonb")
-        vals.append(_json.dumps(results, default=str))
-    if completed_at:
-        parts.append("completed_at = $" + str(len(vals) + 1) + "::timestamptz")
-        vals.append(completed_at)
-    if not parts:
-        return True
-
-    vals.append(scan_id)
-    sql = f"UPDATE pentest_scans SET {', '.join(parts)} WHERE scan_id = ${len(vals)}"
-    ok = await _execute(sql, *vals)
-    if ok:
-        log.debug(f"[DB] pentest scan updated — id={scan_id} status={status}")
-    return ok
-
-
-async def get_pentest_scan(scan_id: str) -> Optional[dict]:
-    """Fetch a single pentest scan by ID, including full results."""
-    row = await _fetchone(
-        "SELECT * FROM pentest_scans WHERE scan_id = $1", scan_id
-    )
-    if row:
-        # Parse JSONB results if present
-        import json as _json
-        if row.get("results") and isinstance(row["results"], str):
-            try:
-                row["results"] = _json.loads(row["results"])
-            except (_json.JSONDecodeError, TypeError):
-                pass
-        # Convert timestamps
-        for ts_key in ("created_at", "completed_at"):
-            if row.get(ts_key) and hasattr(row[ts_key], "isoformat"):
-                row[ts_key] = row[ts_key].isoformat()
-    return row
-
-
-async def list_pentest_scans(limit: int = 50, offset: int = 0) -> list[dict]:
-    """List pentest scans (summary only, no results blob), newest first."""
-    limit = min(int(limit), 200)
-    rows = await _fetchall(
-        """
-        SELECT scan_id, target, scan_type, status, created_at, completed_at, triggered_by
-        FROM pentest_scans
-        ORDER BY created_at DESC
-        LIMIT $1 OFFSET $2
-        """,
-        int(limit), int(offset),
-    )
-    for row in rows:
-        for ts_key in ("created_at", "completed_at"):
-            if row.get(ts_key) and hasattr(row[ts_key], "isoformat"):
-                row[ts_key] = row[ts_key].isoformat()
-    return rows
-
-
-# ── Pentest Sync Wrappers ────────────────────────────────────────────────────
+# ── Pentest Scan Sync Wrappers (async fns live at lines ~1029-1122) ──────────
 
 def sync_insert_pentest_scan(scan_id, target, scan_type="quick", triggered_by="user") -> bool:
-    """Sync bridge → insert_pentest_scan()"""
+    """Sync bridge -> insert_pentest_scan()"""
     try:
         return _run_async(insert_pentest_scan(scan_id, target, scan_type, triggered_by)) or False
     except Exception:
         return False
 
-def sync_update_pentest_scan(scan_id, *, status=None, results=None, completed_at=None) -> bool:
-    """Sync bridge → update_pentest_scan()"""
-    try:
-        return _run_async(update_pentest_scan(
-            scan_id, status=status, results=results, completed_at=completed_at
-        )) or False
-    except Exception:
-        return False
+
 
 def sync_get_pentest_scan(scan_id: str) -> Optional[dict]:
-    """Sync bridge → get_pentest_scan()"""
+    """Sync bridge -> get_pentest_scan()"""
     try:
         return _run_async(get_pentest_scan(scan_id))
     except Exception:
         return None
 
+
 def sync_list_pentest_scans(limit: int = 50, offset: int = 0) -> list:
-    """Sync bridge → list_pentest_scans()"""
+    """Sync bridge -> list_pentest_scans()"""
     try:
         return _run_async(list_pentest_scans(limit=limit, offset=offset)) or []
     except Exception:
@@ -1518,9 +1750,39 @@ def sync_insert_action(
     reason: str = "",
     source: str = "manual",
     confidence: float = 0.0,
+    actor_username: str = "system",
+    actor_role: str = "service",
+    enforcement_method: str = "database",
+    verification_status: str = "unknown",
+    real_block_applied: bool = False,
+    database_only: bool = True,
+    inline_block: bool = False,
+    gateway_block: bool = False,
+    rule_exists: bool = False,
+    command_status: str = "unknown",
+    enforcement_message: str = "",
 ) -> bool:
     try:
-        return _run_async(insert_action(ip, action_type, reason, source, confidence)) or False
+        return _run_async(
+            insert_action(
+                ip,
+                action_type,
+                reason,
+                source,
+                confidence,
+                actor_username,
+                actor_role,
+                enforcement_method,
+                verification_status,
+                real_block_applied,
+                database_only,
+                inline_block,
+                gateway_block,
+                rule_exists,
+                command_status,
+                enforcement_message,
+            )
+        ) or False
     except Exception:
         return False
 
@@ -1543,7 +1805,8 @@ def sync_update_pentest_scan(
                 current_stage=current_stage,
                 results=results,
                 completed_at=completed_at,
-            )
+            ),
+            timeout=30.0
         ) or False
     except Exception:
         return False
@@ -1557,6 +1820,15 @@ def sync_upsert_action_control(
     source: str = "manual",
     confidence: float = 0.0,
     trigger: str = "manual",
+    enforcement_method: str = "database",
+    verification_status: str = "unknown",
+    real_block_applied: bool = False,
+    database_only: bool = True,
+    inline_block: bool = False,
+    gateway_block: bool = False,
+    rule_exists: bool = False,
+    command_status: str = "unknown",
+    enforcement_message: str = "",
 ) -> bool:
     try:
         return _run_async(
@@ -1567,6 +1839,15 @@ def sync_upsert_action_control(
                 source=source,
                 confidence=confidence,
                 trigger=trigger,
+                enforcement_method=enforcement_method,
+                verification_status=verification_status,
+                real_block_applied=real_block_applied,
+                database_only=database_only,
+                inline_block=inline_block,
+                gateway_block=gateway_block,
+                rule_exists=rule_exists,
+                command_status=command_status,
+                enforcement_message=enforcement_message,
             )
         ) or False
     except Exception:
@@ -1730,6 +2011,18 @@ async def get_activity_logs(
     for row in rows:
         if row.get("created_at") and hasattr(row["created_at"], "isoformat"):
             row["created_at"] = row["created_at"].isoformat()
+        if row.get("timestamp") and hasattr(row["timestamp"], "isoformat"):
+            row["timestamp"] = row["timestamp"].isoformat()
+        if isinstance(row.get("metadata"), str):
+            try:
+                import json as _json
+                parsed = _json.loads(row["metadata"])
+                row["metadata"] = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                log.warning("[DB] malformed activity metadata ignored for id=%s", row.get("id"))
+                row["metadata"] = {}
+        elif row.get("metadata") is None:
+            row["metadata"] = {}
     return rows
 
 
@@ -1747,18 +2040,52 @@ def sync_get_activity_logs(
         return []
 
 
-def sync_init_pool() -> None:
+def sync_init_pool(retries: int = 3, retry_delay: float = 2.0) -> bool:
     """
-    Initialise the asyncpg pool from synchronous code.
-    Call this once at Flask app startup or agent startup.
+    Initialise the asyncpg connection pool from synchronous code.
 
-    Example in Flask:
-        with app.app_context():
-            from db import sync_init_pool
-            sync_init_pool()
+    Retries up to `retries` times with `retry_delay` seconds between attempts
+    before giving up.  After pool creation, applies `ensure_runtime_schema()`
+    so all tables and columns are present before any route handler runs.
+
+    Returns True on success, False if every attempt failed.
+
+    Call once at Flask/agent startup — safe to call again; init_pool() is
+    idempotent (skips creation if pool already exists).
     """
-    _run_async(init_pool())
-    _run_async(ensure_runtime_schema())
+    import time as _time
+
+    for attempt in range(1, retries + 1):
+        log.info(f"[DB] sync_init_pool — attempt {attempt}/{retries}")
+        _run_async(init_pool())
+
+        if get_pool() is not None:
+            log.info("[DB] Pool created successfully.")
+            # Apply schema migrations / runtime additions
+            schema_ok = _run_async(ensure_runtime_schema())
+            if schema_ok:
+                log.info("[DB] Runtime schema applied — startup complete.")
+            else:
+                log.warning(
+                    "[DB] ensure_runtime_schema() returned False — "
+                    "some tables/columns may be missing. Check DB permissions."
+                )
+            return True
+
+        log.error(
+            f"[DB] Pool creation failed (attempt {attempt}/{retries}). "
+            "Check PostgreSQL is running and DB_DSN is correct."
+        )
+        if attempt < retries:
+            log.info(f"[DB] Retrying in {retry_delay}s …")
+            _time.sleep(retry_delay)
+
+    log.critical(
+        "[DB] FATAL: Could not initialise DB pool after "
+        f"{retries} attempts. All DB operations will return empty/False. "
+        "Start PostgreSQL and restart the server."
+    )
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────

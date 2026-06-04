@@ -51,6 +51,7 @@ from action_manager     import execute_action          # Threat-specific IPS dis
 from auto_response_engine import auto_response_engine
 from config             import (
     AUTO_RESPONSE_ENABLED, FLOW_TIMEOUT_SEC, MAX_FLOW_PACKETS, API_URL,
+    CAPTURE_INTERFACE, PROMISCUOUS_MODE, SENSOR_MODE,
 )
 from host_actions       import execute_host_action, get_action_state
 from ddos_detector_module  import detect_ddos_from_flows
@@ -60,6 +61,14 @@ from malware_detector      import malware_verdict_by_ip
 from flow_utils            import compute_pps
 from state_manager         import agent_state
 from dashboard_api         import run_api_server
+from network_sensor        import (
+    LIMITATIONS_BY_MODE,
+    VISIBILITY_BY_MODE,
+    increment_flows,
+    increment_packets,
+    mark_sensor_started,
+    normalize_sensor_mode,
+)
 
 from db import (
     sync_init_pool,
@@ -508,12 +517,21 @@ def process_flow_ml(features: dict, src_ip: str):
 ROLLING_WINDOW   = 500   # أقصى عدد تدفقات في النافذة
 ANALYSIS_INTERVAL = 10.0  # كل كام ثانية يتشغّل الـ aggregate
 
-def _run_live():
+def _run_live(iface: str | None = None, sensor_mode: str | None = None, promiscuous: bool | None = None):
     try:
-        from scapy.all import sniff, IP, TCP, UDP
+        from scapy.all import sniff, IP, TCP, UDP, conf
     except ImportError:
         log.error("Scapy غير مثبّت. شغّل: pip install scapy")
         return
+
+    active_promiscuous = PROMISCUOUS_MODE if promiscuous is None else bool(promiscuous)
+    active_iface = iface or CAPTURE_INTERFACE or str(conf.iface or "")
+    active_sensor_mode = normalize_sensor_mode(sensor_mode)
+    mark_sensor_started(
+        interface=active_iface or None,
+        sensor_mode=active_sensor_mode,
+        promiscuous=active_promiscuous,
+    )
 
     flow_table   = defaultdict(lambda: {
         "packets": [], "last_seen": 0.0,
@@ -548,6 +566,7 @@ def _run_live():
     def _flush(key, snap):
         features = compute_features(snap)
         if not features: return
+        increment_flows(1)
         with rolling_lock:
             rolling.append(features)
         process_flow_ml(features, snap["src_ip"])
@@ -580,6 +599,7 @@ def _run_live():
 
     # ── packet handler ───────────────────────────────────────
     def _on_pkt(pkt):
+        increment_packets(1)
         key, src, dst = _get_key(pkt)
         if not key: return
         pkt_data = _parse(pkt, src)
@@ -602,8 +622,13 @@ def _run_live():
     threading.Thread(target=_flusher,   daemon=True).start()
     threading.Thread(target=_aggregate, daemon=True).start()
 
-    log.info(f"[LIVE] Sniffing... (Ctrl+C to stop)")
-    sniff(filter="ip", prn=_on_pkt, store=False)
+    log.info("[LIVE] Sensor mode       : %s", active_sensor_mode.upper())
+    log.info("[LIVE] Visibility type   : %s", VISIBILITY_BY_MODE[active_sensor_mode])
+    log.info("[LIVE] Interface         : %s", active_iface or "scapy-default")
+    log.info("[LIVE] Promiscuous mode  : %s", "ON" if active_promiscuous else "OFF")
+    log.info("[LIVE] Limitation        : %s", LIMITATIONS_BY_MODE[active_sensor_mode])
+    log.info("[LIVE] Sniffing... (Ctrl+C to stop)")
+    sniff(iface=active_iface or None, filter="ip", prn=_on_pkt, store=False, promisc=active_promiscuous)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -839,6 +864,22 @@ def parse_args():
         "--watch", action="store_true",
         help="في mode=csv: يراقب الملف باستمرار بدل one-shot",
     )
+    p.add_argument(
+        "--iface",
+        default=None,
+        help="Capture interface for LIVE mode, for example: --iface Ethernet",
+    )
+    p.add_argument(
+        "--sensor-mode",
+        choices=["host", "span", "tap", "inline"],
+        default=None,
+        help="Deployment profile: host | span | tap | inline",
+    )
+    p.add_argument(
+        "--no-promisc",
+        action="store_true",
+        help="Disable promiscuous capture mode in LIVE mode.",
+    )
     return p.parse_args()
 
 
@@ -846,16 +887,23 @@ def main():
     args = parse_args()
 
     # CRITICAL: Initialize DB connection pool before any operations
-    try:
-        sync_init_pool()
+    db_ready = sync_init_pool(retries=3, retry_delay=2.0)
+    if db_ready:
         sync_db_ping()
-        print("  [*] DB Connection Pool initialized.")
-    except Exception as e:
-        print(f"  [!] DB Pool init failed: {e}")
+        print("  [*] DB Connection Pool initialized — OK")
+    else:
+        print("  [!] DB Pool init FAILED after 3 attempts.")
+        print("  [!] Running in DEGRADED mode — detections will NOT be persisted.")
+        print("  [!] Start PostgreSQL and restart to enable DB logging.")
 
     print("\n" + "=" * 60)
     print("  [*] UNIFIED IDS AGENT")
     print(f"  Mode  : {args.mode.upper()}")
+    if args.mode == "live":
+        banner_sensor_mode = normalize_sensor_mode(args.sensor_mode or SENSOR_MODE)
+        print(f"  Iface : {args.iface or CAPTURE_INTERFACE or 'scapy-default'}")
+        print(f"  Sensor: {banner_sensor_mode.upper()} ({VISIBILITY_BY_MODE[banner_sensor_mode]})")
+        print(f"  Promisc: {'OFF' if args.no_promisc else 'ON' if PROMISCUOUS_MODE else 'OFF'}")
     if args.mode != "live":
         print(f"  Input : {args.input}")
     if args.mode == "csv" and args.watch:
@@ -877,7 +925,11 @@ def main():
     print()
 
     if args.mode == "live":
-        _run_live()
+        _run_live(
+            iface=args.iface,
+            sensor_mode=args.sensor_mode or SENSOR_MODE,
+            promiscuous=False if args.no_promisc else None,
+        )
 
     elif args.mode == "pcap":
         _run_pcap(args.input)

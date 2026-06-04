@@ -1,18 +1,30 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Design tokens ─────────────────────────────────────────────────────────── */
 :root {
   color-scheme: dark;
-  font-family: "Segoe UI Variable", "Trebuchet MS", "Segoe UI", sans-serif;
-  background-color: #0b0f14;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  background-color: #080c12;
+
+  /* Glow palette */
+  --glow-sky:    rgba(14, 165, 233, 0.18);
+  --glow-indigo: rgba(99, 102, 241, 0.14);
+  --glow-red:    rgba(239, 68, 68, 0.12);
+  --glow-green:  rgba(34, 197, 94, 0.10);
 }
 
+/* ─── Global background ─────────────────────────────────────────────────────── */
 html {
   background:
-    radial-gradient(circle at top left, rgba(56, 189, 248, 0.1), transparent 28%),
-    radial-gradient(circle at top right, rgba(239, 68, 68, 0.12), transparent 22%),
-    #0b0f14;
+    radial-gradient(ellipse 70% 40% at 15% -10%, var(--glow-sky), transparent),
+    radial-gradient(ellipse 60% 35% at 85% 5%,  var(--glow-red), transparent),
+    radial-gradient(ellipse 80% 60% at 50% 100%, var(--glow-indigo), transparent),
+    #080c12;
+  background-attachment: fixed;
 }
 
 body {
@@ -20,23 +32,124 @@ body {
   min-width: 320px;
   min-height: 100vh;
   background-color: transparent;
-  color: #e5eef8;
+  color: #e2eaf4;
+  line-height: 1.6;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
 }
 
-* {
-  box-sizing: border-box;
+/* ─── Box model ─────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+/* ─── Typography ────────────────────────────────────────────────────────────── */
+h1, h2, h3, h4, h5, h6 { font-feature-settings: "cv11", "ss01"; letter-spacing: -0.02em; }
+code, pre, .font-mono { font-family: "JetBrains Mono", "Cascadia Code", monospace; }
+
+/* ─── Scrollbars ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar        { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb  { background: rgba(71, 85, 105, 0.7); border-radius: 9999px; }
+::-webkit-scrollbar-track  { background: rgba(15, 23, 42, 0.4); }
+
+/* ─── Animation keyframes ───────────────────────────────────────────────────── */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes slide-in {
+  from { opacity: 0; transform: translateX(-12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(14, 165, 233, 0.4); }
+  50%       { box-shadow: 0 0 0 8px rgba(14, 165, 233, 0); }
+}
+@keyframes scan-line {
+  0%   { transform: translateY(-100%); opacity: 0.6; }
+  100% { transform: translateY(100vh); opacity: 0; }
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+@keyframes counter-up {
+  from { transform: translateY(6px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
 }
 
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+/* ─── Utility classes ───────────────────────────────────────────────────────── */
+.animate-fade-in   { animation: fade-in 0.35s ease both; }
+.animate-slide-in  { animation: slide-in 0.3s ease both; }
+.animate-blink     { animation: blink 1.4s ease-in-out infinite; }
+.animate-counter   { animation: counter-up 0.25s ease both; }
+
+/* Live indicator dot */
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  animation: pulse-glow 2s ease-in-out infinite;
+  display: inline-block;
+}
+.live-dot.warning { background: #f59e0b; animation: pulse-glow 1.2s ease-in-out infinite; box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); }
+.live-dot.danger  { background: #ef4444; animation: pulse-glow 0.8s ease-in-out infinite; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+
+/* Glass card */
+.glass {
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid rgba(148, 163, 184, 0.08);
 }
 
-::-webkit-scrollbar-thumb {
-  background: rgba(71, 85, 105, 0.8);
+/* Glow border on hover */
+.hover-glow:hover {
+  box-shadow: 0 0 0 1px rgba(14, 165, 233, 0.3), 0 8px 32px rgba(14, 165, 233, 0.08);
+  transition: box-shadow 0.2s ease;
+}
+
+/* Custom scrollbar for panels */
+.custom-scrollbar::-webkit-scrollbar       { width: 4px; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(99, 102, 241, 0.4); border-radius: 9999px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+
+/* Scan line effect (decorative) */
+.scan-effect::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(14, 165, 233, 0.6), transparent);
+  animation: scan-line 4s linear infinite;
+  pointer-events: none;
+}
+
+/* Data table row hover */
+tr.data-row:hover td { background: rgba(14, 165, 233, 0.05); transition: background 0.15s; }
+
+/* Focus ring */
+*:focus-visible {
+  outline: 2px solid rgba(14, 165, 233, 0.6);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Gradient text */
+.text-gradient {
+  background: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Status indicator pill */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
   border-radius: 9999px;
-}
-
-::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.45);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }

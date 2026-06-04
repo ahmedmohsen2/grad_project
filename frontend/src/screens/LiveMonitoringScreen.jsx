@@ -27,7 +27,7 @@ function LiveMonitoringScreen({ soc, onSelectIp, onNavigate }) {
   return (
     <Panel
       title="Real-time traffic visibility"
-      subtitle="Live Monitoring"
+      subtitle={`Live Monitoring - ${soc.wsStatus === "connected" ? `WebSocket connected (${soc.wsLatency || 0} ms)` : "Polling fallback active"} - ${soc.bandwidthProfile}`}
       rightSlot={
         <div className="flex w-full flex-col gap-3 md:w-auto md:flex-row">
           <div className="min-w-[260px]">

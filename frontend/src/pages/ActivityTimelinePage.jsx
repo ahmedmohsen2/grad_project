@@ -1,4 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { socApi } from "../services/socApi";
+import { timestampMillis } from "../utils/formatters";
+import { normalizeActivityLogs } from "../utils/socMappers";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -281,7 +284,20 @@ const FILTERS = [
   { key: "alert", label: "🚨 Alert" },
 ];
 
-export default function ActivityTimelinePage({ onOpenIncident }) {
+function mergeLogs(previous = [], incoming = []) {
+  const map = new Map(previous.map((item) => [item.id, item]));
+  incoming.forEach((item) => {
+    const existing = map.get(item.id);
+    if (!existing || timestampMillis(item.updated_at || item.timestamp) >= timestampMillis(existing.updated_at || existing.timestamp)) {
+      map.set(item.id, existing ? { ...existing, ...item } : item);
+    }
+  });
+  return Array.from(map.values())
+    .sort((left, right) => timestampMillis(right.timestamp || right.created_at) - timestampMillis(left.timestamp || left.created_at))
+    .slice(0, 150);
+}
+
+export default function ActivityTimelinePage({ soc, onOpenIncident }) {
   const [logs, setLogs] = useState([]);
   const [filter, setFilter] = useState(null);
   const [targetFilter, setTargetFilter] = useState("");
@@ -297,34 +313,37 @@ export default function ActivityTimelinePage({ onOpenIncident }) {
       if (!silent) setLoading(true);
       setError(null);
       try {
-        const params = new URLSearchParams({ limit: "150" });
-        if (filter) params.append("type", filter);
-        if (targetFilter.trim()) params.append("target", targetFilter.trim());
-        const res = await fetch(
-          `http://localhost:5000/activity/logs?${params}`
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        setLogs(data);
-
-        // Count genuinely new entries
-        const currentIds = new Set(
-          data.map((e) => e.id ?? (e.timestamp + e.action))
-        );
-        let fresh = 0;
-        currentIds.forEach((id) => {
-          if (!prevIds.current.has(id)) fresh++;
+        const data = await socApi.getActivityLogs({ limit: 200 });
+        const normalized = normalizeActivityLogs(Array.isArray(data) ? data : []);
+        setLogs((current) => {
+          let fresh = 0;
+          normalized.forEach((event) => {
+            if (event.id !== undefined && event.id !== null && !prevIds.current.has(event.id)) {
+              fresh += 1;
+            }
+          });
+          if (silent && fresh > 0) setNewCount((n) => n + fresh);
+          const merged = mergeLogs(silent ? current : [], normalized);
+          prevIds.current = new Set(merged.map((event) => event.id));
+          return merged;
         });
-        if (silent && fresh > 0) setNewCount((n) => n + fresh);
-        prevIds.current = currentIds;
       } catch (e) {
         setError(e.message);
       } finally {
         setLoading(false);
       }
     },
-    [filter, targetFilter]
+    []
   );
+
+  useEffect(() => {
+    if (!Array.isArray(soc?.activityLogs) || soc.activityLogs.length === 0) return;
+    setLogs((current) => {
+      const merged = mergeLogs(current, soc.activityLogs);
+      prevIds.current = new Set(merged.map((event) => event.id));
+      return merged;
+    });
+  }, [soc?.activityLogs]);
 
   // Initial load
   useEffect(() => {
@@ -348,14 +367,20 @@ export default function ActivityTimelinePage({ onOpenIncident }) {
     setNewCount(0);
   };
 
-  // Stats
-  const counts = logs.reduce((acc, e) => {
+  const filteredLogs = useMemo(() => {
+    const target = targetFilter.trim().toLowerCase();
+    return logs.filter((event) => {
+      const matchesType = !filter || event.type === filter;
+      const matchesTarget = !target || String(event.target || "").toLowerCase().includes(target);
+      return matchesType && matchesTarget;
+    });
+  }, [filter, logs, targetFilter]);
+
+  // Global stats intentionally derive from the complete event store, not the filtered view.
+  const counts = useMemo(() => logs.reduce((acc, e) => {
     acc[e.type] = (acc[e.type] || 0) + 1;
     return acc;
-  }, {});
-  const successes = logs.filter((e) => e.status === "success" || e.status === "resolved").length;
-  const failures = logs.filter((e) => e.status === "failed").length;
-
+  }, {}), [logs]);
   // Group logs by target if no target filter is applied (Optional: can be flat, but narrative is better flat, grouped by IP is nice too. User said: "Group events by target IP. Click an IP -> show full lifecycle timeline for that host." If target is empty, we show all chronologically. If target is set, we show narrative for that host.)
   const isTargetFiltered = !!targetFilter.trim();
 
@@ -466,7 +491,7 @@ export default function ActivityTimelinePage({ onOpenIncident }) {
             <div className="font-bold mb-1">⚠️ Connection Error</div>
             {error} — Make sure the backend is running on port 5000.
           </div>
-        ) : logs.length === 0 ? (
+        ) : filteredLogs.length === 0 ? (
           <div className="py-24 text-center text-slate-500">
             <div className="text-5xl mb-4 opacity-50">📋</div>
             <p className="text-lg font-medium text-slate-400">No activity events found.</p>
@@ -477,7 +502,7 @@ export default function ActivityTimelinePage({ onOpenIncident }) {
         ) : (
           <div className="relative">
             <div className="max-h-[65vh] overflow-y-auto pr-2 custom-scrollbar">
-              {logs.map((event, idx) => (
+              {filteredLogs.map((event, idx) => (
                 <TimelineEvent
                   key={event.id ?? idx}
                   event={event}

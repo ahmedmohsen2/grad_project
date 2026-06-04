@@ -3,6 +3,9 @@ import time
 from collections import deque
 import asyncio
 import random
+import logging
+
+log = logging.getLogger("state_manager")
 
 # ──────────────────────────────────────────────────────────────
 # AUTO DEFENSE — Decision Engine + Cooldown
@@ -71,6 +74,7 @@ class StateManager:
         self.attack_counters = {}
         
         self.ws_clients = set()
+        self.ws_lock = threading.Lock()
         self.loop = None  # to hold the asyncio event loop for websocket
 
     def set_loop(self, loop):
@@ -79,7 +83,9 @@ class StateManager:
     # ── Safe thread → async bridge ────────────────────────────
     def _safe_broadcast(self, data: dict):
         """Submit a broadcast to the event loop from any thread. Never blocks."""
-        if self.loop and self.ws_clients:
+        with self.ws_lock:
+            has_clients = bool(self.ws_clients)
+        if self.loop and has_clients:
             try:
                 if self.loop.is_running():
                     asyncio.run_coroutine_threadsafe(self._broadcast(data), self.loop)
@@ -125,7 +131,7 @@ class StateManager:
                 "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
         }
-        print(f"[WS] Broadcasting alert: {ip} - {attack_type}")
+        log.debug("broadcasting alert ip=%s attack=%s", ip, attack_type)
         self._safe_broadcast(payload)
 
     def broadcast_action(self, ip: str, action: str, reason: str = ""):
@@ -139,17 +145,21 @@ class StateManager:
                 "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
         }
-        print(f"[WS] Broadcasting action: {action} on {ip}")
+        log.debug("broadcasting action=%s ip=%s", action, ip)
         self._safe_broadcast(payload)
 
     async def _broadcast(self, data: dict):
         to_remove = set()
-        for ws in self.ws_clients:
+        with self.ws_lock:
+            clients = list(self.ws_clients)
+        for ws in clients:
             try:
                 await ws.send_json(data)
             except Exception:
                 to_remove.add(ws)
-        self.ws_clients -= to_remove
+        if to_remove:
+            with self.ws_lock:
+                self.ws_clients.difference_update(to_remove)
 
     def get_metrics(self):
         with self.lock:
@@ -175,4 +185,3 @@ class StateManager:
             }
 
 agent_state = StateManager()
-

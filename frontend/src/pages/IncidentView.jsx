@@ -12,8 +12,7 @@ import {
   scanStatusBadgeClass,
   severityBadgeClass,
 } from "../api/api";
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000";
+import { socApi } from "../services/socApi";
 
 function buildHeaderTone(status) {
   if (status === "active" || status === "unresolved") {
@@ -143,11 +142,7 @@ export default function IncidentView({ soc }) {
           requests.push(Promise.resolve(null));
         }
         if (context.target) {
-          requests.push(
-            fetch(`${API_BASE_URL}/activity/logs?target=${encodeURIComponent(context.target)}&limit=120`).then((res) =>
-              res.ok ? res.json() : [],
-            ),
-          );
+          requests.push(socApi.getActivityLogs({ target: context.target, limit: 120 }).catch(() => []));
         } else {
           requests.push(Promise.resolve([]));
         }
@@ -213,6 +208,13 @@ export default function IncidentView({ soc }) {
       confidence: item.confidence,
       remediation: item.remediation,
       affected_component: item.affected_component,
+      evidence: item.evidence,
+      classification: item.classification || item.metadata?.classification,
+      validation_status: item.validation_status || item.metadata?.validation_status,
+      evidence_source: item.evidence_source || item.metadata?.evidence_source,
+      related_port: item.related_port || item.metadata?.related_port,
+      protocol: item.protocol || item.metadata?.protocol,
+      detection_method: item.detection_method || item.metadata?.detection_method,
     }));
   }, [relatedFindings, scanDetails]);
 
@@ -486,6 +488,19 @@ export default function IncidentView({ soc }) {
                         </span>
                       </div>
                       <p className="mt-3 text-sm text-slate-300">{item.description || "No description available."}</p>
+                      <div className="mt-3 grid gap-2 text-[11px] text-slate-500 sm:grid-cols-2">
+                        <span>classification: {item.classification || "SUSPECTED"}</span>
+                        <span>validation: {item.validation_status || "requires review"}</span>
+                        <span>source: {item.evidence_source || "scan"}</span>
+                        <span>service: {item.related_port ? `${item.protocol || "tcp"}/${item.related_port}` : item.affected_component || "-"}</span>
+                      </div>
+                      {item.detection_method ? <p className="mt-2 text-[11px] text-sky-300/80">Detection method: {item.detection_method}</p> : null}
+                      {item.evidence ? <p className="mt-2 rounded-lg border border-slate-800 bg-slate-950/40 p-2 font-mono text-[11px] text-slate-300">{item.evidence}</p> : null}
+                      {item.classification === "HEURISTIC" ? (
+                        <div className="mt-2 rounded-lg border border-amber-500/20 bg-amber-500/10 p-2 text-[11px] text-amber-200">
+                          Analyst validation required before confirmation.
+                        </div>
+                      ) : null}
                     </button>
                   );
                 })

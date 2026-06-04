@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import functools
+import hmac
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -25,7 +26,7 @@ import jwt
 import bcrypt
 from flask import Blueprint, request, jsonify, g
 
-from config import JWT_SECRET_KEY, JWT_EXPIRATION_HOURS, INVITE_KEY
+from config import API_TOKEN, JWT_SECRET_KEY, JWT_EXPIRATION_HOURS, INVITE_KEY, ADMIN_INVITE_KEY
 
 log = logging.getLogger("AUTH")
 
@@ -90,6 +91,17 @@ def decode_token(token: str) -> Optional[dict]:
         return None
 
 
+def _api_token_is_valid() -> bool:
+    if not API_TOKEN:
+        return False
+    supplied = (
+        request.headers.get("X-API-Token")
+        or request.headers.get("X-API-Key")
+        or ""
+    ).strip()
+    return hmac.compare_digest(supplied, API_TOKEN)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # AUTH DECORATOR  (@require_auth)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -109,6 +121,15 @@ def require_auth(f):
     """
     @functools.wraps(f)
     def decorated(*args, **kwargs):
+        if _api_token_is_valid():
+            g.current_user = {
+                "user_id": "api-token",
+                "username": "api-token",
+                "email": "",
+                "role": "service",
+            }
+            return f(*args, **kwargs)
+
         auth_header = request.headers.get("Authorization", "")
 
         if not auth_header.startswith("Bearer "):
@@ -128,11 +149,105 @@ def require_auth(f):
             "user_id": payload["user_id"],
             "username": payload["username"],
             "email": payload["email"],
-            "role": payload["role"],
+            "role": normalize_role(payload.get("role", "analyst")),
         }
 
         return f(*args, **kwargs)
     return decorated
+
+
+ROLE_ALIASES = {
+    "administrator": "admin",
+    "soc_admin": "admin",
+    "soc admin": "admin",
+    "security_admin": "admin",
+    "analyst": "analyst",
+    "soc_analyst": "analyst",
+    "soc analyst": "analyst",
+    "security_analyst": "analyst",
+    "tier1": "analyst",
+    "tier_1": "analyst",
+    "tier-1": "analyst",
+    "service": "service",
+}
+
+
+def normalize_role(role: object) -> str:
+    text = str(role or "").strip().lower()
+    return ROLE_ALIASES.get(text, text)
+
+
+def require_role(*allowed_roles: str):
+    """
+    Enforce role-based access for state-changing security operations.
+
+    Roles:
+      admin   - full SOC, policy override, and destructive/global controls
+      analyst - SOC triage plus lab/demo containment actions
+      service - trusted API token automation
+    """
+    allowed = {normalize_role(role) for role in allowed_roles}
+
+    def decorator(f):
+        @functools.wraps(f)
+        @require_auth
+        def decorated(*args, **kwargs):
+            user = getattr(g, "current_user", None) or {}
+            role = normalize_role(user.get("role"))
+            if role == "service" or role in allowed:
+                return f(*args, **kwargs)
+            allowed_label = ", ".join(sorted(allowed)) or "authorized"
+            return jsonify({
+                "error": "Forbidden",
+                "message": f"This operation requires one of these roles: {allowed_label}.",
+                "required_roles": sorted(allowed),
+                "current_role": role or None,
+            }), 403
+
+        return decorated
+
+    return decorator
+
+
+def optional_auth(f):
+    """
+    Flask decorator for read-only endpoints accessible without login.
+
+    - If NO Authorization header is present → g.current_user = None, request allowed.
+    - If a valid token IS present          → g.current_user is populated as normal.
+    - If an INVALID / expired token is sent → 401 (prevents token forgery on open routes).
+
+    Use for: /detections, /flows, /alerts, /actions, /health, /blocked-ips
+    """
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+
+        if not auth_header:
+            # No token supplied — allow through as anonymous
+            g.current_user = None
+            return f(*args, **kwargs)
+
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Malformed Authorization header"}), 401
+
+        token = auth_header[7:]
+        payload = decode_token(token)
+
+        if payload is None:
+            return jsonify({"error": "Invalid or expired token"}), 401
+
+        g.current_user = {
+            "user_id": payload["user_id"],
+            "username": payload["username"],
+            "email": payload["email"],
+            "role": normalize_role(payload.get("role", "analyst")),
+        }
+
+        return f(*args, **kwargs)
+    return decorated
+
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -181,7 +296,8 @@ def signup():
         return jsonify({"error": "Password must be at least 6 characters"}), 400
 
     # ── Invite Key Check ─────────────────────────────────────────────────────
-    if invite_key != INVITE_KEY:
+    requested_role = "admin" if ADMIN_INVITE_KEY and invite_key == ADMIN_INVITE_KEY else "analyst"
+    if invite_key != INVITE_KEY and requested_role != "admin":
         return jsonify({"error": "Invalid invite key"}), 403
 
     # ── Create User ──────────────────────────────────────────────────────────
@@ -195,7 +311,7 @@ def signup():
         return jsonify({"error": "Username already taken"}), 409
 
     pw_hash = hash_password(password)
-    user = sync_create_user(username, email, pw_hash)
+    user = sync_create_user(username, email, pw_hash, role=requested_role)
 
     if not user:
         return jsonify({"error": "Failed to create user (database error)"}), 500

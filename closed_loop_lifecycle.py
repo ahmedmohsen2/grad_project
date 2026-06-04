@@ -22,6 +22,13 @@ SEVERITY_BASE_SCORE = {
     "critical": 90,
 }
 
+CONFIDENCE_WEIGHT = {
+    "CONFIRMED": 1.0,
+    "SUSPECTED": 0.82,
+    "HEURISTIC": 0.55,
+    "INFORMATIONAL": 0.25,
+}
+
 
 def utcnow_iso() -> str:
     return datetime.utcnow().isoformat()
@@ -37,16 +44,31 @@ def finding_fingerprint(target: str, vuln: dict) -> str:
         str(target or "").strip().lower(),
         str(vuln.get("title") or "").strip().lower(),
         str(vuln.get("affected_component") or "").strip().lower(),
+        str(vuln.get("related_port") or "").strip().lower(),
+        str(vuln.get("detection_method") or "").strip().lower(),
     ]
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:24]
 
 
-def compute_risk_score(severity: str, confidence: float, *, persisted: bool = False, resolved: bool = False) -> int:
+def compute_risk_score(
+    severity: str,
+    confidence: float,
+    *,
+    classification: str = "SUSPECTED",
+    related_port: int | None = None,
+    persisted: bool = False,
+    resolved: bool = False,
+) -> int:
     base = SEVERITY_BASE_SCORE.get(normalize_severity(severity), 50)
-    confidence_bonus = int(max(0.0, min(1.0, float(confidence or 0.0))) * 10)
-    score = base + confidence_bonus
-    if persisted:
+    conf = max(0.0, min(1.0, float(confidence or 0.0)))
+    class_name = str(classification or "SUSPECTED").upper()
+    score = int(base * conf * CONFIDENCE_WEIGHT.get(class_name, 0.70))
+    if related_port in {23, 445, 3389, 5900, 6379, 27017, 9200}:
         score += 10
+    elif related_port in {21, 1433, 3306, 5432, 1521}:
+        score += 6
+    if persisted:
+        score += 8
     if resolved:
         score -= 35
     return max(0, min(100, score))
@@ -71,6 +93,12 @@ def build_alert_metadata(target: str, vuln: dict, finding_id: str) -> dict:
         "finding_id": finding_id,
         "title": vuln.get("title"),
         "affected_component": vuln.get("affected_component"),
+        "classification": vuln.get("classification"),
+        "validation_status": vuln.get("validation_status"),
+        "evidence_source": vuln.get("evidence_source"),
+        "related_port": vuln.get("related_port"),
+        "protocol": vuln.get("protocol"),
+        "detection_method": vuln.get("detection_method"),
     }
 
 
@@ -100,6 +128,19 @@ def _record_from_vuln(
     )
     severity = normalize_severity(vuln.get("severity"))
     confidence = float(vuln.get("confidence") or 0.0)
+    metadata = {
+        "last_scan_id": scan_id,
+        "explainable": True,
+        "safe_mode": True,
+        "classification": vuln.get("classification") or "SUSPECTED",
+        "validation_status": vuln.get("validation_status") or "requires_analyst_validation",
+        "evidence_source": vuln.get("evidence_source"),
+        "related_port": vuln.get("related_port"),
+        "protocol": vuln.get("protocol"),
+        "detection_method": vuln.get("detection_method"),
+        "confidence_type": vuln.get("confidence_type"),
+        "validation_label": vuln.get("validation_label"),
+    }
     return {
         "finding_id": finding_id,
         "fingerprint": fingerprint,
@@ -110,7 +151,13 @@ def _record_from_vuln(
         "confidence": confidence,
         "status": status,
         "mitigation_state": mitigation_state,
-        "risk_score": compute_risk_score(severity, confidence, persisted=persisted),
+        "risk_score": compute_risk_score(
+            severity,
+            confidence,
+            classification=metadata["classification"],
+            related_port=metadata["related_port"],
+            persisted=persisted,
+        ),
         "affected_component": vuln.get("affected_component"),
         "description": vuln.get("description"),
         "evidence": vuln.get("evidence"),
@@ -127,11 +174,7 @@ def _record_from_vuln(
         "resolved_at": None if mitigation_state != "mitigated" else now,
         "updated_at": now,
         "timeline": timeline,
-        "metadata": {
-            "last_scan_id": scan_id,
-            "explainable": True,
-            "safe_mode": True,
-        },
+        "metadata": metadata,
     }
 
 
@@ -229,18 +272,22 @@ def process_completed_scan(
             sync_insert_alert(
                 target,
                 "PENTEST_FINDING",
-                f"Pentest detected {record['title']} on {target} ({record['severity']}, confidence {record['confidence']:.2f})",
+                f"Pentest observed {record['title']} on {target} ({record['severity']}, confidence {record['confidence']:.2f})",
                 metadata=build_alert_metadata(target, vuln, record["finding_id"]),
             )
-            decision = auto_response_engine.evaluate_finding(
-                {
-                    "ip": target,
-                    "severity": record["severity"],
-                    "confidence": record["confidence"],
-                    "title": record["title"],
-                }
-            )
-            if decision.action:
+            classification = str((record.get("metadata") or {}).get("classification") or "SUSPECTED").upper()
+            if classification == "CONFIRMED":
+                decision = auto_response_engine.evaluate_finding(
+                    {
+                        "ip": target,
+                        "severity": record["severity"],
+                        "confidence": record["confidence"],
+                        "title": record["title"],
+                    }
+                )
+            else:
+                decision = None
+            if decision and decision.action:
                 action_result, _ = execute_host_action(
                     action=decision.action,
                     target=target,
@@ -278,6 +325,8 @@ def process_completed_scan(
                     refreshed["risk_score"] = compute_risk_score(
                         refreshed.get("severity"),
                         refreshed.get("confidence"),
+                        classification=(refreshed.get("metadata") or {}).get("classification", "SUSPECTED"),
+                        related_port=(refreshed.get("metadata") or {}).get("related_port"),
                         persisted=True,
                     )
                     sync_upsert_security_finding(refreshed)
@@ -298,6 +347,8 @@ def process_completed_scan(
                 original["risk_score"] = compute_risk_score(
                     original.get("severity"),
                     original.get("confidence"),
+                    classification=(original.get("metadata") or {}).get("classification", "SUSPECTED"),
+                    related_port=(original.get("metadata") or {}).get("related_port"),
                     resolved=True,
                 )
                 sync_upsert_security_finding(original)

@@ -117,6 +117,19 @@ CREATE TABLE IF NOT EXISTS actions (
     ip          TEXT      NOT NULL,                        -- FIXED: renamed from 'ip_address' → matches db.py insert
     action_type TEXT      NOT NULL,                        -- IMPROVED: TEXT + NOT NULL (BLOCK|MONITOR|ISOLATE|UNBLOCK)
     reason      TEXT,                                      -- nullable — some actions have no explicit reason
+    source      TEXT      NOT NULL DEFAULT 'system',
+    confidence  DOUBLE PRECISION NOT NULL DEFAULT 0,
+    actor_username TEXT  NOT NULL DEFAULT 'system',
+    actor_role TEXT      NOT NULL DEFAULT 'service',
+    enforcement_method TEXT NOT NULL DEFAULT 'database',
+    verification_status TEXT NOT NULL DEFAULT 'unknown',
+    real_block_applied BOOLEAN NOT NULL DEFAULT FALSE,
+    database_only BOOLEAN NOT NULL DEFAULT TRUE,
+    inline_block BOOLEAN NOT NULL DEFAULT FALSE,
+    gateway_block BOOLEAN NOT NULL DEFAULT FALSE,
+    rule_exists BOOLEAN NOT NULL DEFAULT FALSE,
+    command_status TEXT NOT NULL DEFAULT 'unknown',
+    enforcement_message TEXT,
     acted_at    TIMESTAMP NOT NULL DEFAULT NOW()           -- FIXED: renamed from 'created_at' → matches db.py insert
 );
 

@@ -11,6 +11,7 @@ import IncidentsScreen from "./screens/IncidentsScreen";
 import HostsScreen from "./screens/HostsScreen";
 import ActionsScreen from "./screens/ActionsScreen";
 import SystemStatusScreen from "./screens/SystemStatusScreen";
+import NetworkVisibilityScreen from "./screens/NetworkVisibilityScreen";
 
 const DashboardPage = lazy(() => import("./pages/DashboardPage"));
 const LiveMonitoringPage = lazy(() => import("./pages/LiveMonitoringPage"));
@@ -65,7 +66,13 @@ function AuthenticatedApp() {
   return (
     <div className="min-h-screen bg-surface bg-grid bg-[size:32px_32px] text-slate-100">
       {soc.latestActionToast ? (
-        <div className="fixed right-6 top-6 z-40 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100 shadow-xl">
+        <div className={`fixed right-6 top-6 z-40 rounded-xl border px-4 py-3 text-sm shadow-xl ${
+          soc.latestActionToast.type === "error"
+            ? "border-red-500/30 bg-red-500/10 text-red-100"
+            : soc.latestActionToast.type === "info"
+              ? "border-sky-500/30 bg-sky-500/10 text-sky-100"
+              : "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
+        }`}>
           {soc.latestActionToast.message}
         </div>
       ) : null}
@@ -73,6 +80,7 @@ function AuthenticatedApp() {
         items={NAV_ITEMS}
         activeScreen={currentNav.id}
         counts={soc.sidebarCounts}
+        health={soc.health}
       />
 
       <main className="min-h-screen pl-0 lg:pl-[296px]">
@@ -84,6 +92,8 @@ function AuthenticatedApp() {
               loading={soc.loading}
               lastUpdatedLabel={soc.lastUpdatedLabel}
               newAlertsCount={soc.newAlertsCount}
+              alertStats={soc.alertStats}
+              health={soc.health}
             />
             <Suspense
               fallback={
@@ -103,6 +113,7 @@ function AuthenticatedApp() {
                 <Route path="/hosts" element={<HostsScreen {...sharedScreenProps} />} />
                 <Route path="/actions" element={<ActionsScreen {...sharedScreenProps} />} />
                 <Route path="/system-status" element={<SystemStatusScreen {...sharedScreenProps} />} />
+                <Route path="/network-visibility" element={<NetworkVisibilityScreen {...sharedScreenProps} />} />
                 <Route path="/pentest" element={<PentestConsolePage {...sharedScreenProps} />} />
                 <Route path="/activity-timeline" element={<ActivityTimelinePage {...sharedScreenProps} />} />
                 <Route path="/incident" element={<IncidentView {...sharedScreenProps} />} />

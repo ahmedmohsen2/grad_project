@@ -7,7 +7,7 @@ import {
 } from "recharts";
 import EmptyState from "../common/EmptyState";
 
-const chartColors = ["#ef4444", "#facc15", "#22c55e"];
+const chartColors = ["#ef4444", "#f97316", "#facc15", "#22c55e", "#06b6d4", "#8b5cf6", "#ec4899"];
 
 function AttackDistributionChart({ data }) {
   if (!data.length || data.every((item) => item.value === 0)) {
@@ -34,7 +34,7 @@ function AttackDistributionChart({ data }) {
             strokeWidth={3}
           >
             {data.map((entry, index) => (
-              <Cell key={entry.label} fill={chartColors[index % chartColors.length]} />
+              <Cell key={entry.label} fill={entry.color || chartColors[index % chartColors.length]} />
             ))}
           </Pie>
           <Tooltip
@@ -44,7 +44,7 @@ function AttackDistributionChart({ data }) {
               borderRadius: "16px",
               color: "#e2e8f0",
             }}
-            formatter={(value) => [`${value}%`, "Share"]}
+            formatter={(value, _name, item) => [`${value}% (${item?.payload?.count ?? 0})`, "Share"]}
           />
         </PieChart>
       </ResponsiveContainer>

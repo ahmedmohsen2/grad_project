@@ -26,9 +26,16 @@ function SuspiciousQueueScreen({ soc, onSelectIp, onNavigate }) {
   // IPs that were auto-acted by AutoResponseEngine
   const autoActedIps = useMemo(() => getAutoActedIps(soc.actions), [soc.actions]);
 
+  const blockedIpSet = useMemo(
+    () => new Set((soc.blockedIps || []).map((b) => b.ip)),
+    [soc.blockedIps],
+  );
+
   const rows = useMemo(() => {
     const baseRows = soc.detections
       .filter((item) => item.result !== "NORMAL")
+      // Defence-in-depth: also filter client-side in case poll hasn't refreshed yet
+      .filter((item) => !blockedIpSet.has(item.src_ip))
       .filter((item) => !removedIds.includes(item.id));
 
     return [...baseRows].sort((left, right) => {
@@ -37,7 +44,8 @@ function SuspiciousQueueScreen({ soc, onSelectIp, onNavigate }) {
       }
       return Number(right.confidence) - Number(left.confidence);
     });
-  }, [soc.detections, sortBy, removedIds]);
+  }, [soc.detections, sortBy, removedIds, blockedIpSet]);
+
 
   const toggleSelected = (id) => {
     setSelectedIds((current) =>
@@ -124,8 +132,23 @@ function SuspiciousQueueScreen({ soc, onSelectIp, onNavigate }) {
     <div className="space-y-6">
       <Panel
         title="Analyst decision queue"
-        subtitle="Suspicious Queue"
-        rightSlot={<SelectField value={sortBy} onChange={setSortBy} options={["Confidence", "Last Seen"]} />}
+        subtitle={`Suspicious Queue — ${rows.length} active threat${rows.length !== 1 ? "s" : ""}`}
+        rightSlot={
+          <div className="flex items-center gap-3">
+            {/* Live containment summary */}
+            <div className="flex items-center gap-2 text-xs">
+              <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-emerald-300 font-semibold">
+                🛡️ {soc.blockedIps.length} Contained
+              </span>
+              {isolatedIds.length > 0 && (
+                <span className="flex items-center gap-1.5 rounded-full border border-orange-500/25 bg-orange-500/10 px-2.5 py-1 text-orange-300 font-semibold">
+                  🔒 {isolatedIds.length} Isolated
+                </span>
+              )}
+            </div>
+            <SelectField value={sortBy} onChange={setSortBy} options={["Confidence", "Last Seen"]} />
+          </div>
+        }
       >
         {/* Bulk action bar */}
         <div className="mb-5 flex flex-wrap items-center gap-3">
@@ -150,6 +173,7 @@ function SuspiciousQueueScreen({ soc, onSelectIp, onNavigate }) {
               {selectedIds.length} of {rows.length} selected
             </span>
           )}
+
         </div>
 
         <DataTable
@@ -189,7 +213,15 @@ function SuspiciousQueueScreen({ soc, onSelectIp, onNavigate }) {
               key: "status",
               header: "Status",
               render: (row) => {
-                if (isolatedIds.includes(row.id)) {
+                const cs = row.containment_status;
+                if (cs === "BLOCKED" || blockedIpSet.has(row.src_ip)) {
+                  return (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-red-500/15 px-2.5 py-0.5 text-xs font-semibold text-red-300 ring-1 ring-red-500/30">
+                      🚫 BLOCKED
+                    </span>
+                  );
+                }
+                if (isolatedIds.includes(row.id) || cs === "ISOLATED") {
                   return (
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-500/15 px-2.5 py-0.5 text-xs font-medium text-orange-300 ring-1 ring-orange-500/30">
                       ISOLATED
@@ -203,9 +235,15 @@ function SuspiciousQueueScreen({ soc, onSelectIp, onNavigate }) {
                     </span>
                   );
                 }
-                return <span className="text-xs text-slate-500">Active</span>;
+                return (
+                  <span className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+                    <span className="live-dot" />
+                    Active
+                  </span>
+                );
               },
             },
+
             { key: "confidenceLabel", header: "Confidence" },
             { key: "detectedAtLabel", header: "Last Seen" },
             {
