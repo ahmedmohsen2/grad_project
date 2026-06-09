@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { authSignup } from "../api/api";
+import brandLogo from "../fs-ai-logo.png";
 
 export default function SignupPage() {
   const navigate = useNavigate();
@@ -74,10 +75,8 @@ export default function SignupPage() {
       <div className="relative z-10 w-full max-w-md px-4">
         {/* Logo / Brand */}
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-sky-600 shadow-lg shadow-emerald-500/20">
-            <svg className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M18 7.5v3m0 0v3m0-3h3m-3 0h-3m-2.25-4.125a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zM3 19.235v-.11a6.375 6.375 0 0112.75 0v.109A12.318 12.318 0 019.374 21c-2.331 0-4.512-.645-6.374-1.766z" />
-            </svg>
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl bg-slate-950/80 shadow-lg shadow-emerald-500/20 ring-1 ring-sky-400/30">
+            <img src={brandLogo} alt="Fusion Strike AI logo" className="h-14 w-14 object-contain" />
           </div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Create Account</h1>
           <p className="mt-1 text-sm text-slate-400">Join the Security Operations Center</p>

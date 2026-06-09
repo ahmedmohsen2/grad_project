@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import StatusBadge from "../common/StatusBadge";
 import { useAuth } from "../../hooks/useAuth.jsx";
+import brandLogo from "../../fs-ai-logo.png";
 
 function Sidebar({ items, activeScreen, counts, health }) {
   const navigate = useNavigate();
@@ -15,8 +16,8 @@ function Sidebar({ items, activeScreen, counts, health }) {
       {/* Brand block */}
       <div className="rounded-2xl border border-sky-500/20 bg-gradient-to-br from-sky-950/60 to-slate-950/60 p-4 shadow-lg shadow-sky-900/10">
         <div className="flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-indigo-600 shadow shadow-sky-500/30 text-lg">
-            🛡️
+          <div className="h-10 w-10 shrink-0 overflow-hidden rounded-xl shadow-md shadow-sky-500/40 ring-2 ring-sky-400/50">
+            <img src={brandLogo} alt="Fusion Strike AI logo" className="h-full w-full object-cover" />
           </div>
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-sky-400/80">Fusion Strike AI</p>
@@ -59,11 +60,10 @@ function Sidebar({ items, activeScreen, counts, health }) {
               type="button"
               onClick={() => navigate(item.path)}
               style={{ animationDelay: `${idx * 30}ms` }}
-              className={`animate-fade-in flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm font-medium transition-all duration-200 ${
-                isActive
-                  ? "bg-sky-500/12 text-sky-200 ring-1 ring-sky-500/25 shadow-sm shadow-sky-900/20"
-                  : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-100"
-              }`}
+              className={`animate-fade-in flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm font-medium transition-all duration-200 ${isActive
+                ? "bg-sky-500/12 text-sky-200 ring-1 ring-sky-500/25 shadow-sm shadow-sky-900/20"
+                : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-100"
+                }`}
             >
               <span className="flex items-center gap-2.5">
                 <span className={`text-base ${isActive ? "opacity-100" : "opacity-60"}`}>
